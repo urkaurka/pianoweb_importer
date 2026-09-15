@@ -1,5 +1,8 @@
 from types import SimpleNamespace
 
+from ut_ensure_sqlserver import _parse_connection_string, _valid_sa_password
+from ut_restore_backup import _consume_all_result_sets
+from ut_reset_postgres import _quote_identifier, _quote_literal
 from pianoweb_migration.migration import (
     ColumnDefinition,
     TableDefinition,
@@ -94,3 +97,47 @@ def test_source_rows_are_converted_to_tuples() -> None:
     source_rows = [["value", 42], ("other", 7)]
 
     assert _parameter_rows(source_rows) == (("value", 42), ("other", 7))
+
+
+def test_parse_connection_string_reads_credentials() -> None:
+    settings = _parse_connection_string(
+        "DRIVER={ODBC Driver 18 for SQL Server};SERVER=localhost,1433;"
+        "DATABASE=pianoweb_source;UID=sa;PWD=secret"
+    )
+
+    assert settings["UID"] == "sa"
+    assert settings["PWD"] == "secret"
+
+
+def test_sql_server_sa_password_requires_length_and_complexity() -> None:
+    assert _valid_sa_password("PianoWeb2026!") is True
+    assert _valid_sa_password("short") is False
+    assert _valid_sa_password("onlylowercase") is False
+
+
+def test_consume_all_result_sets_reads_each_select_result() -> None:
+    class FakeCursor:
+        description: tuple[str] | None = None
+
+        def __init__(self) -> None:
+            self.remaining = [(True, ("column",)), (True, None), (False, None)]
+            self.fetches = 0
+
+        def nextset(self) -> bool:
+            has_next, self.description = self.remaining.pop(0)
+            return has_next
+
+        def fetchall(self) -> list[object]:
+            self.fetches += 1
+            return []
+
+    cursor = FakeCursor()
+
+    _consume_all_result_sets(cursor)
+
+    assert cursor.fetches == 1
+
+
+def test_postgres_sql_quoting_escapes_identifiers_and_literals() -> None:
+    assert _quote_identifier('project"db') == '"project""db"'
+    assert _quote_literal("project's db") == "'project''s db'"

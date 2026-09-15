@@ -25,7 +25,7 @@ def main() -> int:
         import pyodbc
     except ImportError as error:
         raise SystemExit(
-            "Install migration dependencies with: pip install -r requirements-migration.txt"
+            "Install migration dependencies with: pip install -r requirements.txt"
         ) from error
 
     env_values = load_env_file(args.env_file)
