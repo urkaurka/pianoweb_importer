@@ -41,9 +41,35 @@ WHERE constraints.table_schema = current_schema()
   AND constraints.constraint_type = 'FOREIGN KEY'
   AND columns.column_name = 'fk_finalita_progetto'
 """
+PERSON_TYPE_PURPOSE_ORPHANS_SQL = """
+SELECT person_type."fk_finalita_progetto"
+FROM "tabella_tipo_persona" AS person_type
+LEFT JOIN "tabella_finalita_progetto" AS purpose
+    ON purpose."id" = person_type."fk_finalita_progetto"
+WHERE person_type."fk_finalita_progetto" IS NOT NULL
+  AND purpose."id" IS NULL
+ORDER BY person_type."fk_finalita_progetto"
+"""
+PERSON_TYPE_FOREIGN_KEY_SQL = """
+SELECT constraints.constraint_name
+FROM information_schema.table_constraints AS constraints
+JOIN information_schema.key_column_usage AS columns
+    ON columns.constraint_name = constraints.constraint_name
+   AND columns.table_schema = constraints.table_schema
+WHERE constraints.table_schema = current_schema()
+  AND constraints.table_name = 'tabella_tipo_persona'
+  AND constraints.constraint_type = 'FOREIGN KEY'
+  AND columns.column_name = 'fk_finalita_progetto'
+"""
 ADD_AREA_FOREIGN_KEY_SQL = """
 ALTER TABLE "aree"
 ADD CONSTRAINT "aree_fk_finalita_progetto_fkey"
+FOREIGN KEY ("fk_finalita_progetto")
+REFERENCES "tabella_finalita_progetto" ("id") ON DELETE SET NULL
+"""
+ADD_PERSON_TYPE_FOREIGN_KEY_SQL = """
+ALTER TABLE "tabella_tipo_persona"
+ADD CONSTRAINT "tabella_tipo_persona_fk_finalita_progetto_fkey"
 FOREIGN KEY ("fk_finalita_progetto")
 REFERENCES "tabella_finalita_progetto" ("id") ON DELETE SET NULL
 """
@@ -111,6 +137,22 @@ def ensure_area_purpose_foreign_key(cursor: Any) -> str:
     return "AREE foreign key created"
 
 
+def ensure_person_type_purpose_foreign_key(cursor: Any) -> str:
+    """Ensure person types reference an existing project purpose."""
+    cursor.execute(PERSON_TYPE_PURPOSE_ORPHANS_SQL)
+    orphan_values = [row[0] for row in cursor.fetchall()]
+    if orphan_values:
+        values = ", ".join(str(value) for value in orphan_values)
+        raise RuntimeError(
+            f"Cannot create TABELLA_TIPO_PERSONA foreign key; orphan values: {values}"
+        )
+    cursor.execute(PERSON_TYPE_FOREIGN_KEY_SQL)
+    if cursor.fetchone() is not None:
+        return "TABELLA_TIPO_PERSONA foreign key already exists"
+    cursor.execute(ADD_PERSON_TYPE_FOREIGN_KEY_SQL)
+    return "TABELLA_TIPO_PERSONA foreign key created"
+
+
 def run_post_import_operations(connection: Any) -> list[str]:
     """Normalize imported objects and add required constraints atomically."""
     with connection.transaction():
@@ -123,4 +165,5 @@ def run_post_import_operations(connection: Any) -> list[str]:
                 f"Renamed {len(renamed_columns)} application column(s)",
             ]
             messages.append(ensure_area_purpose_foreign_key(cursor))
+            messages.append(ensure_person_type_purpose_foreign_key(cursor))
             return messages
