@@ -15,6 +15,11 @@ def main() -> int:
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--batch-size", type=int, default=1000)
     parser.add_argument(
+        "--keep-tmp",
+        action="store_true",
+        help="Keep the temporary PostgreSQL schema after the import",
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help="Truncate matching PostgreSQL tables and import the source data",
@@ -46,6 +51,7 @@ def main() -> int:
             destination_connection,
             batch_size=args.batch_size,
             apply=args.apply,
+            keep_tmp=args.keep_tmp,
         )
         print(f"Processed {len(tables)} table(s).")
     finally:

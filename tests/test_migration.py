@@ -1,11 +1,15 @@
 from types import SimpleNamespace
+from datetime import datetime
 
 from ut_ensure_sqlserver import _parse_connection_string, _valid_sa_password
 from ut_restore_backup import _consume_all_result_sets
 from ut_reset_postgres import _quote_identifier, _quote_literal
 from pianoweb_migration.migration import (
+    AUDIT_METADATA_FIELDS,
     ColumnDefinition,
     TableDefinition,
+    _date_value,
+    _destination_columns,
     _parameter_rows,
     _truncate_tables,
     load_table_definitions,
@@ -97,6 +101,51 @@ def test_source_rows_are_converted_to_tuples() -> None:
     source_rows = [["value", 42], ("other", 7)]
 
     assert _parameter_rows(source_rows) == (("value", 42), ("other", 7))
+
+
+def test_destination_columns_remove_only_legacy_audit_metadata() -> None:
+    table = TableDefinition(
+        "dbo",
+        "Users",
+        tuple(ColumnDefinition(name, "text", True) for name in (
+            "Id",
+            "InserimentoData",
+            "InserimentoUtente",
+            "ModificaData",
+            "ModificaUtente",
+            "CancellaData",
+            "CancellaUtente",
+            "Name",
+        )),
+    )
+
+    assert [column.name for column in _destination_columns(table)] == [
+        "Id",
+        "CancellaData",
+        "Name",
+    ]
+    assert "CancellaData" not in AUDIT_METADATA_FIELDS
+
+
+def test_missing_audit_date_uses_import_fallback() -> None:
+    fallback = _date_value(None, datetime(2010, 1, 1))
+
+    assert fallback == datetime(2010, 1, 1)
+
+
+def test_audit_record_ids_support_textual_primary_keys() -> None:
+    from pianoweb_migration.migration import _audit_row
+
+    row = _audit_row(
+        TableDefinition("dbo", "Config", ()),
+        "GSTPERM.Config.ImportaUtentiNtAllAvvio",
+        "INSERT",
+        datetime(2010, 1, 1),
+        None,
+        {},
+    )
+
+    assert row[1] == "GSTPERM.Config.ImportaUtentiNtAllAvvio"
 
 
 def test_parse_connection_string_reads_credentials() -> None:
