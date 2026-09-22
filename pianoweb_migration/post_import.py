@@ -99,6 +99,84 @@ ADD CONSTRAINT "divisioni_id_dipartimento_fkey"
 FOREIGN KEY ("id_dipartimento")
 REFERENCES "dipartimenti" ("id") ON DELETE SET NULL
 """
+REFERENT_DEPARTMENT_ORPHANS_SQL = """
+SELECT referent."id_dipartimento"
+FROM "referenti" AS referent
+LEFT JOIN "dipartimenti" AS department
+    ON department."id" = referent."id_dipartimento"
+WHERE referent."id_dipartimento" IS NOT NULL
+  AND department."id" IS NULL
+ORDER BY referent."id_dipartimento"
+"""
+REFERENT_DEPARTMENT_FOREIGN_KEY_SQL = """
+SELECT constraints.constraint_name
+FROM information_schema.table_constraints AS constraints
+JOIN information_schema.key_column_usage AS columns
+    ON columns.constraint_name = constraints.constraint_name
+   AND columns.table_schema = constraints.table_schema
+WHERE constraints.table_schema = current_schema()
+  AND constraints.table_name = 'referenti'
+  AND constraints.constraint_type = 'FOREIGN KEY'
+  AND columns.column_name = 'id_dipartimento'
+"""
+ADD_REFERENT_DEPARTMENT_FOREIGN_KEY_SQL = """
+ALTER TABLE "referenti"
+ADD CONSTRAINT "referenti_id_dipartimento_fkey"
+FOREIGN KEY ("id_dipartimento")
+REFERENCES "dipartimenti" ("id") ON DELETE SET NULL
+"""
+REFERENT_DIVISION_ORPHANS_SQL = """
+SELECT referent."id_divisione"
+FROM "referenti" AS referent
+LEFT JOIN "divisioni" AS division
+    ON division."id" = referent."id_divisione"
+WHERE referent."id_divisione" IS NOT NULL
+  AND division."id" IS NULL
+ORDER BY referent."id_divisione"
+"""
+REFERENT_DIVISION_FOREIGN_KEY_SQL = """
+SELECT constraints.constraint_name
+FROM information_schema.table_constraints AS constraints
+JOIN information_schema.key_column_usage AS columns
+    ON columns.constraint_name = constraints.constraint_name
+   AND columns.table_schema = constraints.table_schema
+WHERE constraints.table_schema = current_schema()
+  AND constraints.table_name = 'referenti'
+  AND constraints.constraint_type = 'FOREIGN KEY'
+  AND columns.column_name = 'id_divisione'
+"""
+ADD_REFERENT_DIVISION_FOREIGN_KEY_SQL = """
+ALTER TABLE "referenti"
+ADD CONSTRAINT "referenti_id_divisione_fkey"
+FOREIGN KEY ("id_divisione")
+REFERENCES "divisioni" ("id") ON DELETE SET NULL
+"""
+REFERENT_PERSON_TYPE_ORPHANS_SQL = """
+SELECT referent."fk_tipo_persona"
+FROM "referenti" AS referent
+LEFT JOIN "tabella_tipo_persona" AS person_type
+    ON person_type."id" = referent."fk_tipo_persona"
+WHERE referent."fk_tipo_persona" IS NOT NULL
+  AND person_type."id" IS NULL
+ORDER BY referent."fk_tipo_persona"
+"""
+REFERENT_PERSON_TYPE_FOREIGN_KEY_SQL = """
+SELECT constraints.constraint_name
+FROM information_schema.table_constraints AS constraints
+JOIN information_schema.key_column_usage AS columns
+    ON columns.constraint_name = constraints.constraint_name
+   AND columns.table_schema = constraints.table_schema
+WHERE constraints.table_schema = current_schema()
+  AND constraints.table_name = 'referenti'
+  AND constraints.constraint_type = 'FOREIGN KEY'
+  AND columns.column_name = 'fk_tipo_persona'
+"""
+ADD_REFERENT_PERSON_TYPE_FOREIGN_KEY_SQL = """
+ALTER TABLE "referenti"
+ADD CONSTRAINT "referenti_fk_tipo_persona_fkey"
+FOREIGN KEY ("fk_tipo_persona")
+REFERENCES "tabella_tipo_persona" ("id") ON DELETE SET NULL
+"""
 
 
 def _quote_identifier(identifier: str) -> str:
@@ -195,6 +273,56 @@ def ensure_division_department_foreign_key(cursor: Any) -> str:
     return "Checked DIVISIONI foreign key: created"
 
 
+def _ensure_referent_foreign_key(
+    cursor: Any,
+    *,
+    orphan_sql: str,
+    foreign_key_sql: str,
+    add_foreign_key_sql: str,
+    label: str,
+) -> str:
+    cursor.execute(orphan_sql)
+    orphan_values = [row[0] for row in cursor.fetchall()]
+    if orphan_values:
+        values = ", ".join(str(value) for value in orphan_values)
+        raise RuntimeError(f"Cannot create {label} foreign key; orphan values: {values}")
+    cursor.execute(foreign_key_sql)
+    if cursor.fetchone() is not None:
+        return f"Checked {label} foreign key: already exists"
+    cursor.execute(add_foreign_key_sql)
+    return f"Checked {label} foreign key: created"
+
+
+def ensure_referent_department_foreign_key(cursor: Any) -> str:
+    return _ensure_referent_foreign_key(
+        cursor,
+        orphan_sql=REFERENT_DEPARTMENT_ORPHANS_SQL,
+        foreign_key_sql=REFERENT_DEPARTMENT_FOREIGN_KEY_SQL,
+        add_foreign_key_sql=ADD_REFERENT_DEPARTMENT_FOREIGN_KEY_SQL,
+        label="REFERENTI.id_dipartimento",
+    )
+
+
+def ensure_referent_division_foreign_key(cursor: Any) -> str:
+    return _ensure_referent_foreign_key(
+        cursor,
+        orphan_sql=REFERENT_DIVISION_ORPHANS_SQL,
+        foreign_key_sql=REFERENT_DIVISION_FOREIGN_KEY_SQL,
+        add_foreign_key_sql=ADD_REFERENT_DIVISION_FOREIGN_KEY_SQL,
+        label="REFERENTI.id_divisione",
+    )
+
+
+def ensure_referent_person_type_foreign_key(cursor: Any) -> str:
+    return _ensure_referent_foreign_key(
+        cursor,
+        orphan_sql=REFERENT_PERSON_TYPE_ORPHANS_SQL,
+        foreign_key_sql=REFERENT_PERSON_TYPE_FOREIGN_KEY_SQL,
+        add_foreign_key_sql=ADD_REFERENT_PERSON_TYPE_FOREIGN_KEY_SQL,
+        label="REFERENTI.fk_tipo_persona",
+    )
+
+
 def run_post_import_operations(connection: Any) -> list[str]:
     """Normalize imported objects and add required constraints atomically."""
     with connection.transaction():
@@ -209,4 +337,7 @@ def run_post_import_operations(connection: Any) -> list[str]:
             messages.append(ensure_area_purpose_foreign_key(cursor))
             messages.append(ensure_person_type_purpose_foreign_key(cursor))
             messages.append(ensure_division_department_foreign_key(cursor))
+            messages.append(ensure_referent_department_foreign_key(cursor))
+            messages.append(ensure_referent_division_foreign_key(cursor))
+            messages.append(ensure_referent_person_type_foreign_key(cursor))
             return messages
