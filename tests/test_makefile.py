@@ -23,3 +23,10 @@ def test_import_runs_post_import_operations_in_importer() -> None:
     assert ".PHONY: help import post_import" in makefile
     assert "post_import:" in makefile
     assert "$(MAKE) post_import" in makefile
+
+
+def test_help_documents_post_import_target() -> None:
+    makefile = Path("Makefile").read_text()
+
+    help_recipe = makefile.split("help:\n", maxsplit=1)[1].split("\n\n", maxsplit=1)[0]
+    assert '@echo "  make post_import"' in help_recipe

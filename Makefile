@@ -17,6 +17,8 @@ help:
 	@echo "  make import FILE=path/to/backup.bak"
 	@echo "      Start the SQL Server container when needed, then restore the SQL Server database and import into PostgreSQL."
 	@echo "      WARNING: this operation is destructive."
+	@echo "  make post_import"
+	@echo "      Apply PostgreSQL operations required after the import."
 	@echo ""
 	@echo "Optional variables:"
 	@echo "  SQLSERVER_CONTAINER=pianoweb-sqlserver"
