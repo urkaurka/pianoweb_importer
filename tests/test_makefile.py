@@ -15,3 +15,11 @@ def test_import_removes_temporary_schema_by_default_and_can_keep_it() -> None:
 
     assert "KEEP_TMP ?= 0" in makefile
     assert "--keep-tmp" in makefile
+
+
+def test_import_runs_post_import_operations_in_importer() -> None:
+    makefile = Path("Makefile").read_text()
+
+    assert ".PHONY: help import post_import" in makefile
+    assert "post_import:" in makefile
+    assert "$(MAKE) post_import" in makefile

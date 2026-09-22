@@ -8,7 +8,7 @@ SQLSERVER_BACKUP_PATH ?= /var/opt/mssql/backup/pianoweb_import.bak
 MSSQL_DATABASE ?= pianoweb_source
 KEEP_TMP ?= 0
 
-.PHONY: help import
+.PHONY: help import post_import
 
 help:
 	@echo "Available targets:"
@@ -27,6 +27,9 @@ help:
 	@echo "  KEEP_TMP=1"
 	@echo "      Keep the temporary PostgreSQL schema for inspection after import."
 
+post_import:
+	$(PYTHON) ut_post_import.py
+
 import:
 	@test -n "$(FILE)" || (echo "Usage: make import FILE=/absolute/or/relative/path/to/file.bak"; exit 2)
 	@test -f "$(FILE)" || (echo "Backup file not found: $(FILE)"; exit 2)
@@ -37,3 +40,4 @@ import:
 	$(PYTHON) ut_inspect_source.py
 	$(PYTHON) ut_reset_postgres.py
 	$(PYTHON) ut_migrate_database.py --apply $(if $(filter 1 true yes,$(KEEP_TMP)),--keep-tmp,)
+	$(MAKE) post_import
