@@ -299,6 +299,75 @@ ADD CONSTRAINT "progetti_macrofasi_fasi_id_progetto_id_macrofase_fkey"
 FOREIGN KEY ("id_progetto", "id_macrofase")
 REFERENCES "progetti_macrofasi" ("id_progetto", "id_macrofase")
 """
+STATO_AVANZAMENTO_ID_UNIQUE_EXISTS_SQL = """
+SELECT constraints.constraint_name
+FROM information_schema.table_constraints AS constraints
+JOIN information_schema.key_column_usage AS columns
+    ON columns.constraint_catalog = constraints.constraint_catalog
+   AND columns.constraint_schema = constraints.constraint_schema
+   AND columns.constraint_name = constraints.constraint_name
+   AND columns.table_schema = constraints.table_schema
+WHERE constraints.table_schema = current_schema()
+  AND constraints.table_name = 'tabella_statoavanzamento'
+  AND constraints.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+GROUP BY constraints.constraint_name
+HAVING count(*) = 1 AND bool_or(columns.column_name = 'id')
+"""
+STATO_AVANZAMENTO_ID_DUPLICATES_SQL = """
+SELECT "id", count(*)
+FROM "tabella_statoavanzamento"
+GROUP BY "id"
+HAVING "id" IS NULL OR count(*) > 1
+ORDER BY "id"
+"""
+ADD_STATO_AVANZAMENTO_ID_UNIQUE_SQL = """
+ALTER TABLE "tabella_statoavanzamento"
+ADD CONSTRAINT "tabella_statoavanzamento_id_key" UNIQUE ("id")
+"""
+PROJECT_AREA_ORPHANS_SQL = """
+SELECT child."id", child."id_area"
+FROM "progetti_aree" AS child
+LEFT JOIN "aree" AS parent ON parent."id" = child."id_area"
+WHERE child."id_area" IS NOT NULL AND parent."id" IS NULL
+ORDER BY child."id"
+"""
+PROJECT_AREA_ROW_COUNT_SQL = 'SELECT count(*) FROM "progetti_aree"'
+DELETE_PROJECT_AREA_ORPHANS_SQL = """
+DELETE FROM "progetti_aree" AS child
+WHERE child."id" = ANY(%s)
+  AND NOT EXISTS (
+      SELECT 1 FROM "aree" AS parent WHERE parent."id" = child."id_area"
+  )
+RETURNING child."id"
+"""
+PROJECT_IMPORTANCE_ORPHANS_SQL = """
+SELECT project."id", project."id_classe_importanza"
+FROM "progetti" AS project
+LEFT JOIN "tabella_classiimportanza" AS importance
+    ON importance."id" = project."id_classe_importanza"
+WHERE project."id_classe_importanza" IS NOT NULL
+  AND importance."id" IS NULL
+ORDER BY project."id"
+"""
+PROJECT_ROW_COUNT_SQL = 'SELECT count(*) FROM "progetti"'
+NULL_PROJECT_IMPORTANCE_ORPHANS_SQL = """
+UPDATE "progetti" AS project
+SET "id_classe_importanza" = NULL
+WHERE project."id" = ANY(%s)
+  AND NOT EXISTS (
+      SELECT 1 FROM "tabella_classiimportanza" AS importance
+      WHERE importance."id" = project."id_classe_importanza"
+  )
+RETURNING project."id"
+"""
+COMPOSITE_FOREIGN_KEY_EXISTS_SQL = """
+SELECT constraint_name
+FROM information_schema.table_constraints
+WHERE table_schema = current_schema()
+  AND table_name = %s
+  AND constraint_name = %s
+  AND constraint_type = 'FOREIGN KEY'
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,6 +380,17 @@ class ForeignKeyDefinition:
     referenced_table: str
     referenced_column: str
     on_delete: str = "NO ACTION"
+
+
+@dataclass(frozen=True, slots=True)
+class CompositeForeignKeyDefinition:
+    """A composite foreign key inferred from related project columns."""
+
+    name: str
+    table: str
+    columns: tuple[str, ...]
+    referenced_table: str
+    referenced_columns: tuple[str, ...]
 
 
 SOURCE_FOREIGN_KEYS = (
@@ -391,6 +471,141 @@ PROJECT_PURPOSE_FOREIGN_KEYS = tuple(
         "tabella_statoavanzamento",
     )
 )
+INFERRED_FOREIGN_KEYS = tuple(
+    ForeignKeyDefinition(
+        f"{table}_{column}_fkey", table, column, referenced_table, referenced_column
+    )
+    for table, column, referenced_table, referenced_column in (
+        ("fase", "fk_fase", "fase", "pk"),
+        ("fase", "fk_progetto", "progetti", "id"),
+        ("fase_controlli", "fk_fase", "fase", "pk"),
+        ("fase_controlli", "fk_controllo_periodicita", "tabella_frequenzecontrolli", "id"),
+        ("fase_controlli", "fk_controllo_risultato", "fase_controlli_risultato", "id"),
+        ("fase_costo", "fk_fase", "fase", "pk"),
+        ("fase_persona", "fk_fase", "fase", "pk"),
+        ("fase_persona", "fk_persona", "referenti", "id"),
+        ("fase_prodotto", "fk_fase", "fase", "pk"),
+        ("fase_rischio", "fk_fase", "fase", "pk"),
+        ("fase_rischio", "fk_rischio_gravita", "fase_rischio_gravita", "id"),
+        ("fase_stato_avanzamento", "fk_fase", "fase", "pk"),
+        ("fase_stato_avanzamento", "fk_fase_colore", "tabella_staticolore", "id"),
+        ("fase_stato_avanzamento", "fk_stato_avanzamento", "tabella_statoavanzamento", "id"),
+        ("indicatore", "fk_stati_colore", "tabella_staticolore", "id"),
+        ("indicatore", "fk_valutazione_finale_percentuale", "tabella_valutazione_finale", "pk"),
+        ("indicatore", "fk_indicatore_tipologia", "indicatore_tipologia", "id"),
+        ("indicatore", "fk_progetto", "progetti", "id"),
+        ("indicatore", "fk_operatore_aritmetico", "tabella_operatori_aritmetici", "id"),
+        ("indicatore", "fk_tipo_dato", "tabella_tipo_dato_indicatore", "id"),
+        ("indicatore", "fk_operatore_aritmetico_soglia", "tabella_op_aritm_soglia", "id"),
+        ("indicatore_progetti", "fk_indicatore", "indicatore", "pk"),
+        ("indicatore_progetti", "fk_progetto", "progetti", "id"),
+        ("indicatore_progetti", "fk_valutazione", "valutazione", "pk"),
+        ("operatoripianoweb", "id_dip", "dipartimenti", "id"),
+        ("progetti", "id_classe_importanza", "tabella_classiimportanza", "id"),
+        ("progetti_aree", "id_area", "aree", "id"),
+        ("progetti_documenti", "id_fase", "fase", "pk"),
+        ("progetti_documenti", "id_documento", "documenti", "id"),
+        ("progetti_macrofasi_fasi", "id_fase", "fase", "pk"),
+        ("progetti_macrofasi_fasi_referenti", "id_fase", "fase", "pk"),
+        ("progetti_macrofasi_fasi_referenti", "id_referente", "referenti", "id"),
+        ("progetti_macrofasi_fasi_referenti", "id_coinvolgimento", "tabella_coinvolgimenti", "id"),
+        ("progetti_macrofasi_fasi_stati", "id_fase", "fase", "pk"),
+        ("progetti_macrofasi_fasi_stati", "id_colore", "tabella_staticolore", "id"),
+        ("progetti_macrofasi_fasi_stati", "id_stato_avanzamento", "tabella_statoavanzamento", "id"),
+        ("progetti_macrofasi_referenti", "id_referente", "referenti", "id"),
+        ("progetti_macrofasi_referenti", "id_coinvolgimento", "tabella_coinvolgimenti", "id"),
+        ("progetti_macrofasi_stati", "id_colore", "tabella_staticolore", "id"),
+        ("progetti_macrofasi_stati", "id_stato_avanzamento", "tabella_statoavanzamento", "id"),
+        ("progetti_referenti", "id_referente", "referenti", "id"),
+        ("progetti_referenti", "id_coinvolgimento", "tabella_coinvolgimenti", "id"),
+        ("progetti_referenti", "id_referenti_responsabilita", "referenti_responsabilita", "id"),
+        ("progetti_rischi", "id_fase", "fase", "pk"),
+        ("progetti_rischi", "id_rischio", "rischi", "id"),
+        ("progetti_stati", "id_colore", "tabella_staticolore", "id"),
+        ("progetti_stati", "id_stato_avanzamento", "tabella_statoavanzamento", "id"),
+        ("relazioni_progetti", "id_progetto_padre", "progetti", "id"),
+        ("relazioni_progetti", "id_progetto_figlio", "progetti", "id"),
+        ("rischi", "id_gravita", "tabella_gravitarischi", "id"),
+        ("valutazione", "fk_progetto", "progetti", "id"),
+        ("valutazione", "fk_val_progetto", "valutazione_progetto", "pk"),
+        ("valutazione", "fk_val_obiettivi", "valutazione_obiettivi", "pk"),
+        ("valutazione", "fk_val_responsabilita", "valutazione_responsabilita", "pk"),
+        ("valutazione", "fk_val_pianificazione", "valutazione_pianificazione", "pk"),
+        ("valutazione", "fk_val_avanzamento", "valutazione_avanzamento", "pk"),
+    )
+)
+INFERRED_COMPOSITE_FOREIGN_KEYS = (
+    CompositeForeignKeyDefinition(
+        "progetti_documenti_project_macrophase_fkey",
+        "progetti_documenti",
+        ("id_progetto", "id_macrofase"),
+        "progetti_macrofasi",
+        ("id_progetto", "id_macrofase"),
+    ),
+    CompositeForeignKeyDefinition(
+        "progetti_documenti_project_macrophase_phase_fkey",
+        "progetti_documenti",
+        ("id_progetto", "id_macrofase", "id_fase"),
+        "progetti_macrofasi_fasi",
+        ("id_progetto", "id_macrofase", "id_fase"),
+    ),
+    CompositeForeignKeyDefinition(
+        "progetti_macrofasi_fasi_referenti_project_macrophase_fkey",
+        "progetti_macrofasi_fasi_referenti",
+        ("id_progetto", "id_macrofase"),
+        "progetti_macrofasi",
+        ("id_progetto", "id_macrofase"),
+    ),
+    CompositeForeignKeyDefinition(
+        "progetti_macrofasi_fasi_referenti_project_macrophase_phase_fkey",
+        "progetti_macrofasi_fasi_referenti",
+        ("id_progetto", "id_macrofase", "id_fase"),
+        "progetti_macrofasi_fasi",
+        ("id_progetto", "id_macrofase", "id_fase"),
+    ),
+    CompositeForeignKeyDefinition(
+        "progetti_macrofasi_fasi_stati_project_macrophase_fkey",
+        "progetti_macrofasi_fasi_stati",
+        ("id_progetto", "id_macrofase"),
+        "progetti_macrofasi",
+        ("id_progetto", "id_macrofase"),
+    ),
+    CompositeForeignKeyDefinition(
+        "progetti_macrofasi_fasi_stati_project_macrophase_phase_fkey",
+        "progetti_macrofasi_fasi_stati",
+        ("id_progetto", "id_macrofase", "id_fase"),
+        "progetti_macrofasi_fasi",
+        ("id_progetto", "id_macrofase", "id_fase"),
+    ),
+    CompositeForeignKeyDefinition(
+        "progetti_macrofasi_referenti_project_macrophase_fkey",
+        "progetti_macrofasi_referenti",
+        ("id_progetto", "id_macrofase"),
+        "progetti_macrofasi",
+        ("id_progetto", "id_macrofase"),
+    ),
+    CompositeForeignKeyDefinition(
+        "progetti_rischi_project_macrophase_fkey",
+        "progetti_rischi",
+        ("id_progetto", "id_macrofase"),
+        "progetti_macrofasi",
+        ("id_progetto", "id_macrofase"),
+    ),
+    CompositeForeignKeyDefinition(
+        "progetti_macrofasi_stati_project_macrophase_fkey",
+        "progetti_macrofasi_stati",
+        ("id_progetto", "id_macrofase"),
+        "progetti_macrofasi",
+        ("id_progetto", "id_macrofase"),
+    ),
+    CompositeForeignKeyDefinition(
+        "progetti_rischi_project_macrophase_phase_fkey",
+        "progetti_rischi",
+        ("id_progetto", "id_macrofase", "id_fase"),
+        "progetti_macrofasi_fasi",
+        ("id_progetto", "id_macrofase", "id_fase"),
+    ),
+)
 SOURCE_FOREIGN_KEY_EXISTS_SQL = """
 SELECT constraints.constraint_name
 FROM information_schema.table_constraints AS constraints
@@ -464,6 +679,174 @@ def _ensure_source_foreign_key(cursor: Any, foreign_key: ForeignKeyDefinition) -
         """
     )
     return f"Checked {foreign_key.name} foreign key: created"
+
+
+def ensure_stato_avanzamento_id_unique(cursor: Any) -> str:
+    """Ensure stato-avanzamento IDs are protected as a referenced key."""
+    cursor.execute(STATO_AVANZAMENTO_ID_UNIQUE_EXISTS_SQL)
+    if cursor.fetchone() is not None:
+        return "Checked tabella_statoavanzamento.id unique constraint: already exists"
+
+    cursor.execute(STATO_AVANZAMENTO_ID_DUPLICATES_SQL)
+    invalid_ids = cursor.fetchall()
+    if invalid_ids:
+        values = ", ".join(
+            f"{value} ({count} rows)" for value, count in invalid_ids
+        )
+        raise RuntimeError(
+            "Cannot make tabella_statoavanzamento.id unique; "
+            f"duplicate or null IDs: {values}"
+        )
+
+    cursor.execute(ADD_STATO_AVANZAMENTO_ID_UNIQUE_SQL)
+    return "Checked tabella_statoavanzamento.id unique constraint: created"
+
+
+def _cleanup_small_project_area_orphans(cursor: Any) -> list[str]:
+    cursor.execute(PROJECT_AREA_ORPHANS_SQL)
+    orphan_rows = cursor.fetchall()
+    if not orphan_rows:
+        return []
+
+    cursor.execute(PROJECT_AREA_ROW_COUNT_SQL)
+    total_rows = cursor.fetchone()[0]
+    orphan_count = len(orphan_rows)
+    percentage = orphan_count / total_rows * 100 if total_rows else 100.0
+    if orphan_count * 100 >= total_rows * 3:
+        raise RuntimeError(
+            "Cannot create progetti_aree.id_area foreign key; "
+            f"{orphan_count}/{total_rows} rows are orphaned "
+            f"({percentage:.2f}%), threshold is below 3%"
+        )
+
+    orphan_ids = [row[0] for row in orphan_rows]
+    missing_area_ids = sorted({row[1] for row in orphan_rows})
+    cursor.execute(DELETE_PROJECT_AREA_ORPHANS_SQL, (orphan_ids,))
+    deleted_ids = [row[0] for row in cursor.fetchall()]
+    if set(deleted_ids) != set(orphan_ids):
+        raise RuntimeError(
+            "Could not delete every orphan row from progetti_aree; "
+            f"expected IDs {orphan_ids}, deleted IDs {deleted_ids}"
+        )
+    return [
+        f"Found {orphan_count} orphan row(s) in progetti_aree "
+        f"({orphan_count}/{total_rows}, {percentage:.2f}%); "
+        f"missing area IDs: {', '.join(map(str, missing_area_ids))}",
+        f"Deleted {len(deleted_ids)} orphan row(s) from progetti_aree",
+    ]
+
+
+def _clear_small_project_importance_orphans(cursor: Any) -> list[str]:
+    cursor.execute(PROJECT_IMPORTANCE_ORPHANS_SQL)
+    orphan_rows = cursor.fetchall()
+    if not orphan_rows:
+        return []
+
+    cursor.execute(PROJECT_ROW_COUNT_SQL)
+    total_rows = cursor.fetchone()[0]
+    orphan_count = len(orphan_rows)
+    percentage = orphan_count / total_rows * 100 if total_rows else 100.0
+    if orphan_count * 100 >= total_rows * 3:
+        raise RuntimeError(
+            "Cannot create progetti.id_classe_importanza foreign key; "
+            f"{orphan_count}/{total_rows} projects have orphan values "
+            f"({percentage:.2f}%), threshold is below 3%"
+        )
+
+    project_ids = [row[0] for row in orphan_rows]
+    missing_importance_ids = sorted({row[1] for row in orphan_rows})
+    cursor.execute(NULL_PROJECT_IMPORTANCE_ORPHANS_SQL, (project_ids,))
+    updated_ids = [row[0] for row in cursor.fetchall()]
+    if set(updated_ids) != set(project_ids):
+        raise RuntimeError(
+            "Could not clear every orphan importance value from progetti; "
+            f"expected project IDs {project_ids}, updated IDs {updated_ids}"
+        )
+    return [
+        f"Found {orphan_count} orphan project importance value(s) "
+        f"({orphan_count}/{total_rows}, {percentage:.2f}%); "
+        f"missing importance IDs: {', '.join(map(str, missing_importance_ids))}",
+        f"Cleared orphan importance values for {len(updated_ids)} project(s)",
+    ]
+
+
+def _ensure_composite_foreign_key(
+    cursor: Any, foreign_key: CompositeForeignKeyDefinition
+) -> str:
+    table = _quote_identifier(foreign_key.table)
+    referenced_table = _quote_identifier(foreign_key.referenced_table)
+    child_columns = [
+        _quote_identifier(column) for column in foreign_key.columns
+    ]
+    parent_columns = [
+        _quote_identifier(column) for column in foreign_key.referenced_columns
+    ]
+    if len(child_columns) != len(parent_columns):
+        raise ValueError(
+            f"Composite foreign key {foreign_key.name} has mismatched column counts"
+        )
+
+    all_child_columns_present = " AND ".join(
+        f"child.{column} IS NOT NULL" for column in child_columns
+    )
+    matching_columns = " AND ".join(
+        f"parent.{parent_column} = child.{child_column}"
+        for parent_column, child_column in zip(parent_columns, child_columns)
+    )
+    cursor.execute(
+        f"""
+        SELECT {', '.join(f'child.{column}' for column in child_columns)}
+        FROM {table} AS child
+        WHERE {all_child_columns_present}
+          AND NOT EXISTS (
+              SELECT 1 FROM {referenced_table} AS parent
+              WHERE {matching_columns}
+          )
+        """
+    )
+    orphan_rows = cursor.fetchall()
+    if orphan_rows:
+        values = ", ".join(
+            "(" + ", ".join(str(value) for value in row) + ")"
+            for row in orphan_rows
+        )
+        raise RuntimeError(
+            f"Cannot create {foreign_key.name} foreign key; "
+            f"orphan key tuples: {values}"
+        )
+
+    cursor.execute(
+        COMPOSITE_FOREIGN_KEY_EXISTS_SQL,
+        (foreign_key.table, foreign_key.name),
+    )
+    if cursor.fetchone() is not None:
+        return f"Checked {foreign_key.name} foreign key: already exists"
+
+    cursor.execute(
+        f"""
+        ALTER TABLE {table}
+        ADD CONSTRAINT {_quote_identifier(foreign_key.name)}
+        FOREIGN KEY ({', '.join(child_columns)})
+        REFERENCES {referenced_table} ({', '.join(parent_columns)})
+        """
+    )
+    return f"Checked {foreign_key.name} foreign key: created"
+
+
+def ensure_inferred_foreign_keys(cursor: Any) -> list[str]:
+    """Ensure high-confidence references inferred from imported data exist."""
+    messages = [ensure_stato_avanzamento_id_unique(cursor)]
+    messages.extend(_clear_small_project_importance_orphans(cursor))
+    messages.extend(_cleanup_small_project_area_orphans(cursor))
+    messages.extend(
+        _ensure_source_foreign_key(cursor, foreign_key)
+        for foreign_key in INFERRED_FOREIGN_KEYS
+    )
+    messages.extend(
+        _ensure_composite_foreign_key(cursor, foreign_key)
+        for foreign_key in INFERRED_COMPOSITE_FOREIGN_KEYS
+    )
+    return messages
 
 
 def ensure_source_foreign_keys(cursor: Any) -> list[str]:
@@ -844,4 +1227,5 @@ def run_post_import_operations(connection: Any) -> list[str]:
             messages.append(ensure_referent_person_type_foreign_key(cursor))
             messages.extend(ensure_source_foreign_keys(cursor))
             messages.append(ensure_operator_permission_foreign_key(cursor))
+            messages.extend(ensure_inferred_foreign_keys(cursor))
             return messages
