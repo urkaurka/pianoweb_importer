@@ -360,6 +360,30 @@ WHERE project."id" = ANY(%s)
   )
 RETURNING project."id"
 """
+REFERENT_NEW_DEPARTMENT_COLUMN_TYPE_SQL = """
+SELECT data_type
+FROM information_schema.columns
+WHERE table_schema = current_schema()
+  AND table_name = 'referenti_nuovi'
+  AND column_name = 'id_dip'
+"""
+REFERENT_NEW_DEPARTMENT_INVALID_VALUES_SQL = """
+SELECT "id", "id_dip"
+FROM "referenti_nuovi"
+WHERE "id_dip" IS NOT NULL
+  AND (
+      "id_dip" <> trunc("id_dip")
+      OR "id_dip" = 'NaN'::double precision
+      OR "id_dip" IN ('Infinity'::double precision, '-Infinity'::double precision)
+      OR "id_dip" < -2147483648
+      OR "id_dip" > 2147483647
+  )
+ORDER BY "id"
+"""
+ALTER_REFERENT_NEW_DEPARTMENT_COLUMN_TYPE_SQL = """
+ALTER TABLE "referenti_nuovi"
+ALTER COLUMN "id_dip" TYPE integer USING "id_dip"::integer
+"""
 COMPOSITE_FOREIGN_KEY_EXISTS_SQL = """
 SELECT constraint_name
 FROM information_schema.table_constraints
@@ -501,6 +525,7 @@ INFERRED_FOREIGN_KEYS = tuple(
         ("indicatore_progetti", "fk_progetto", "progetti", "id"),
         ("indicatore_progetti", "fk_valutazione", "valutazione", "pk"),
         ("operatoripianoweb", "id_dip", "dipartimenti", "id"),
+        ("referenti_nuovi", "id_dip", "dipartimenti", "id"),
         ("progetti", "id_classe_importanza", "tabella_classiimportanza", "id"),
         ("progetti_aree", "id_area", "aree", "id"),
         ("progetti_documenti", "id_fase", "fase", "pk"),
@@ -702,6 +727,36 @@ def ensure_stato_avanzamento_id_unique(cursor: Any) -> str:
     return "Checked tabella_statoavanzamento.id unique constraint: created"
 
 
+def ensure_referent_new_department_column_type(cursor: Any) -> str:
+    """Convert verified integral department IDs to PostgreSQL integer."""
+    cursor.execute(REFERENT_NEW_DEPARTMENT_COLUMN_TYPE_SQL)
+    column_type_row = cursor.fetchone()
+    if column_type_row is None:
+        raise RuntimeError("Cannot find referenti_nuovi.id_dip")
+    column_type = column_type_row[0]
+    if column_type == "integer":
+        return "Checked referenti_nuovi.id_dip type: already integer"
+    if column_type != "double precision":
+        raise RuntimeError(
+            "Cannot convert referenti_nuovi.id_dip; "
+            f"expected double precision or integer, found {column_type}"
+        )
+
+    cursor.execute(REFERENT_NEW_DEPARTMENT_INVALID_VALUES_SQL)
+    invalid_values = cursor.fetchall()
+    if invalid_values:
+        values = ", ".join(
+            f"id={row_id} (id_dip={value})" for row_id, value in invalid_values
+        )
+        raise RuntimeError(
+            "Cannot convert referenti_nuovi.id_dip to integer; "
+            f"non-integral or out-of-range values: {values}"
+        )
+
+    cursor.execute(ALTER_REFERENT_NEW_DEPARTMENT_COLUMN_TYPE_SQL)
+    return "Checked referenti_nuovi.id_dip type: converted to integer"
+
+
 def _cleanup_small_project_area_orphans(cursor: Any) -> list[str]:
     cursor.execute(PROJECT_AREA_ORPHANS_SQL)
     orphan_rows = cursor.fetchall()
@@ -836,6 +891,7 @@ def _ensure_composite_foreign_key(
 def ensure_inferred_foreign_keys(cursor: Any) -> list[str]:
     """Ensure high-confidence references inferred from imported data exist."""
     messages = [ensure_stato_avanzamento_id_unique(cursor)]
+    messages.append(ensure_referent_new_department_column_type(cursor))
     messages.extend(_clear_small_project_importance_orphans(cursor))
     messages.extend(_cleanup_small_project_area_orphans(cursor))
     messages.extend(
