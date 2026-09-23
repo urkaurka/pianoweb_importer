@@ -232,6 +232,17 @@ DROP_PROJECT_ORIGIN_COLUMN_SQL = """
 ALTER TABLE IF EXISTS "progetti" DROP COLUMN IF EXISTS "id_origine"
 """
 DROP_ORIGIN_TABLE_SQL = 'DROP TABLE IF EXISTS "tabella_origini"'
+PROJECT_FOREIGN_KEY_TABLES_SQL = """
+SELECT columns.table_name
+FROM information_schema.columns AS columns
+JOIN information_schema.tables AS tables
+  ON tables.table_schema = columns.table_schema
+ AND tables.table_name = columns.table_name
+ AND tables.table_type = 'BASE TABLE'
+WHERE columns.table_schema = current_schema()
+  AND columns.column_name = 'id_progetto'
+ORDER BY columns.table_name
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -413,6 +424,39 @@ def ensure_project_purpose_foreign_keys(cursor: Any) -> list[str]:
         _ensure_source_foreign_key(cursor, foreign_key)
         for foreign_key in PROJECT_PURPOSE_FOREIGN_KEYS
     ]
+
+
+def ensure_project_foreign_keys(cursor: Any) -> list[str]:
+    """Ensure tables with id_progetto reference the projects table."""
+    cursor.execute(PROJECT_FOREIGN_KEY_TABLES_SQL)
+    table_names = [row[0] for row in cursor.fetchall()]
+    return [
+        _ensure_source_foreign_key(
+            cursor,
+            ForeignKeyDefinition(
+                f"{table}_id_progetto_fkey",
+                table,
+                "id_progetto",
+                "progetti",
+                "id",
+            ),
+        )
+        for table in table_names
+    ]
+
+
+def ensure_operator_permission_foreign_key(cursor: Any) -> str:
+    """Ensure operator permissions reference existing permissions."""
+    return _ensure_source_foreign_key(
+        cursor,
+        ForeignKeyDefinition(
+            "operatoripermessi_idpermesso_fkey",
+            "operatoripermessi",
+            "idpermesso",
+            "permessi",
+            "id",
+        ),
+    )
 
 
 def rename_application_tables(cursor: Any) -> list[str]:
@@ -606,9 +650,11 @@ def run_post_import_operations(connection: Any) -> list[str]:
             messages.append(ensure_person_type_purpose_foreign_key(cursor))
             messages.append(ensure_keyword_purpose_foreign_key(cursor))
             messages.extend(ensure_project_purpose_foreign_keys(cursor))
+            messages.extend(ensure_project_foreign_keys(cursor))
             messages.append(ensure_division_department_foreign_key(cursor))
             messages.append(ensure_referent_department_foreign_key(cursor))
             messages.append(ensure_referent_division_foreign_key(cursor))
             messages.append(ensure_referent_person_type_foreign_key(cursor))
             messages.extend(ensure_source_foreign_keys(cursor))
+            messages.append(ensure_operator_permission_foreign_key(cursor))
             return messages

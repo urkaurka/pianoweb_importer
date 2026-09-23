@@ -11,6 +11,8 @@ from pianoweb_migration.post_import import (
     SOURCE_FOREIGN_KEYS,
     PROJECT_PURPOSE_FOREIGN_KEYS,
     ensure_project_purpose_foreign_keys,
+    ensure_project_foreign_keys,
+    ensure_operator_permission_foreign_key,
     ensure_source_foreign_keys,
     rename_application_columns,
     rename_application_tables,
@@ -374,5 +376,104 @@ def test_rejects_orphan_project_purpose_values() -> None:
         assert "orphan values: 99" in str(error)
     else:
         raise AssertionError("Expected orphan project-purpose reference")
+
+    assert cursor.execute.call_count == 1
+
+
+def test_creates_project_foreign_keys_for_discovered_tables() -> None:
+    tables = ("progetti_agenda", "progetti_allegati", "progetti_aree")
+    cursor = Mock()
+    cursor.fetchall.side_effect = [
+        [(table,) for table in tables],
+        *[[] for _ in tables],
+    ]
+    cursor.fetchone.return_value = None
+
+    messages = ensure_project_foreign_keys(cursor)
+
+    assert len(messages) == len(tables)
+    assert all(message.endswith("foreign key: created") for message in messages)
+    assert "id_progetto" in cursor.execute.call_args_list[0].args[0]
+    create_statements = [
+        cursor.execute.call_args_list[index].args[0]
+        for index in range(3, cursor.execute.call_count, 3)
+    ]
+    assert len(create_statements) == len(tables)
+    for table, statement in zip(tables, create_statements):
+        assert f'ALTER TABLE "{table}"' in statement
+        assert f'ADD CONSTRAINT "{table}_id_progetto_fkey"' in statement
+        assert 'FOREIGN KEY ("id_progetto")' in statement
+        assert 'REFERENCES "progetti" ("id")' in statement
+
+
+def test_does_not_duplicate_project_foreign_keys() -> None:
+    tables = ("progetti_agenda", "progetti_allegati")
+    cursor = Mock()
+    cursor.fetchall.side_effect = [
+        [(table,) for table in tables],
+        *[[] for _ in tables],
+    ]
+    cursor.fetchone.return_value = ("existing_constraint",)
+
+    messages = ensure_project_foreign_keys(cursor)
+
+    assert len(messages) == len(tables)
+    assert all(message.endswith("foreign key: already exists") for message in messages)
+    assert cursor.execute.call_count == 1 + 2 * len(tables)
+
+
+def test_rejects_orphan_project_ids() -> None:
+    cursor = Mock()
+    cursor.fetchall.side_effect = [[("progetti_agenda",)], [(999,)]]
+
+    try:
+        ensure_project_foreign_keys(cursor)
+    except RuntimeError as error:
+        assert "progetti_agenda_id_progetto_fkey" in str(error)
+        assert "orphan values: 999" in str(error)
+    else:
+        raise AssertionError("Expected orphan project reference")
+
+    assert cursor.execute.call_count == 2
+
+
+def test_creates_operator_permission_foreign_key() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = []
+    cursor.fetchone.return_value = None
+
+    message = ensure_operator_permission_foreign_key(cursor)
+
+    assert message == "Checked operatoripermessi_idpermesso_fkey foreign key: created"
+    assert cursor.execute.call_count == 3
+    statement = cursor.execute.call_args_list[2].args[0]
+    assert 'ALTER TABLE "operatoripermessi"' in statement
+    assert 'ADD CONSTRAINT "operatoripermessi_idpermesso_fkey"' in statement
+    assert 'FOREIGN KEY ("idpermesso")' in statement
+    assert 'REFERENCES "permessi" ("id")' in statement
+
+
+def test_does_not_duplicate_operator_permission_foreign_key() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = []
+    cursor.fetchone.return_value = ("existing_constraint",)
+
+    message = ensure_operator_permission_foreign_key(cursor)
+
+    assert message == "Checked operatoripermessi_idpermesso_fkey foreign key: already exists"
+    assert cursor.execute.call_count == 2
+
+
+def test_rejects_orphan_operator_permission_ids() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = [("missing-permission",)]
+
+    try:
+        ensure_operator_permission_foreign_key(cursor)
+    except RuntimeError as error:
+        assert "operatoripermessi_idpermesso_fkey" in str(error)
+        assert "orphan values: missing-permission" in str(error)
+    else:
+        raise AssertionError("Expected orphan operator permission reference")
 
     assert cursor.execute.call_count == 1
