@@ -3,6 +3,7 @@ from unittest.mock import Mock
 from pianoweb_migration.post_import import (
     ensure_area_purpose_foreign_key,
     ensure_division_department_foreign_key,
+    ensure_keyword_purpose_foreign_key,
     ensure_person_type_purpose_foreign_key,
     ensure_referent_department_foreign_key,
     ensure_referent_division_foreign_key,
@@ -123,6 +124,41 @@ def test_rejects_orphan_person_type_purpose_references() -> None:
         assert "orphan values: 99" in str(error)
     else:
         raise AssertionError("Expected orphan person type purpose reference")
+
+    assert cursor.execute.call_count == 1
+
+
+def test_creates_keyword_purpose_foreign_key_when_no_orphans_exist() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = []
+    cursor.fetchone.return_value = None
+
+    assert ensure_keyword_purpose_foreign_key(cursor) == "Checked TABELLA_PAROLECHIAVE foreign key: created"
+    assert cursor.execute.call_count == 3
+    add_foreign_key_sql = cursor.execute.call_args_list[2].args[0]
+    assert 'ALTER TABLE "tabella_parolechiave"' in add_foreign_key_sql
+    assert 'REFERENCES "tabella_finalita_progetto" ("id")' in add_foreign_key_sql
+
+
+def test_does_not_create_existing_keyword_purpose_foreign_key() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = []
+    cursor.fetchone.return_value = ("tabella_parolechiave_fk_finalita_progetto_fkey",)
+
+    assert ensure_keyword_purpose_foreign_key(cursor) == "Checked TABELLA_PAROLECHIAVE foreign key: already exists"
+    assert cursor.execute.call_count == 2
+
+
+def test_rejects_orphan_keyword_purpose_references() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = [(99,)]
+
+    try:
+        ensure_keyword_purpose_foreign_key(cursor)
+    except RuntimeError as error:
+        assert "orphan values: 99" in str(error)
+    else:
+        raise AssertionError("Expected orphan keyword purpose reference")
 
     assert cursor.execute.call_count == 1
 

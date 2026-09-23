@@ -73,6 +73,32 @@ ADD CONSTRAINT "tabella_tipo_persona_fk_finalita_progetto_fkey"
 FOREIGN KEY ("fk_finalita_progetto")
 REFERENCES "tabella_finalita_progetto" ("id") ON DELETE SET NULL
 """
+KEYWORD_PURPOSE_ORPHANS_SQL = """
+SELECT keyword."fk_finalita_progetto"
+FROM "tabella_parolechiave" AS keyword
+LEFT JOIN "tabella_finalita_progetto" AS purpose
+    ON purpose."id" = keyword."fk_finalita_progetto"
+WHERE keyword."fk_finalita_progetto" IS NOT NULL
+  AND purpose."id" IS NULL
+ORDER BY keyword."fk_finalita_progetto"
+"""
+KEYWORD_FOREIGN_KEY_SQL = """
+SELECT constraints.constraint_name
+FROM information_schema.table_constraints AS constraints
+JOIN information_schema.key_column_usage AS columns
+    ON columns.constraint_name = constraints.constraint_name
+   AND columns.table_schema = constraints.table_schema
+WHERE constraints.table_schema = current_schema()
+  AND constraints.table_name = 'tabella_parolechiave'
+  AND constraints.constraint_type = 'FOREIGN KEY'
+  AND columns.column_name = 'fk_finalita_progetto'
+"""
+ADD_KEYWORD_FOREIGN_KEY_SQL = """
+ALTER TABLE "tabella_parolechiave"
+ADD CONSTRAINT "tabella_parolechiave_fk_finalita_progetto_fkey"
+FOREIGN KEY ("fk_finalita_progetto")
+REFERENCES "tabella_finalita_progetto" ("id") ON DELETE SET NULL
+"""
 DIVISION_DEPARTMENT_ORPHANS_SQL = """
 SELECT division."id_dipartimento"
 FROM "divisioni" AS division
@@ -257,6 +283,22 @@ def ensure_person_type_purpose_foreign_key(cursor: Any) -> str:
     return "Checked TABELLA_TIPO_PERSONA foreign key: created"
 
 
+def ensure_keyword_purpose_foreign_key(cursor: Any) -> str:
+    """Ensure keywords reference an existing project purpose."""
+    cursor.execute(KEYWORD_PURPOSE_ORPHANS_SQL)
+    orphan_values = [row[0] for row in cursor.fetchall()]
+    if orphan_values:
+        values = ", ".join(str(value) for value in orphan_values)
+        raise RuntimeError(
+            f"Cannot create TABELLA_PAROLECHIAVE foreign key; orphan values: {values}"
+        )
+    cursor.execute(KEYWORD_FOREIGN_KEY_SQL)
+    if cursor.fetchone() is not None:
+        return "Checked TABELLA_PAROLECHIAVE foreign key: already exists"
+    cursor.execute(ADD_KEYWORD_FOREIGN_KEY_SQL)
+    return "Checked TABELLA_PAROLECHIAVE foreign key: created"
+
+
 def ensure_division_department_foreign_key(cursor: Any) -> str:
     """Ensure divisions reference an existing department."""
     cursor.execute(DIVISION_DEPARTMENT_ORPHANS_SQL)
@@ -336,6 +378,7 @@ def run_post_import_operations(connection: Any) -> list[str]:
             ]
             messages.append(ensure_area_purpose_foreign_key(cursor))
             messages.append(ensure_person_type_purpose_foreign_key(cursor))
+            messages.append(ensure_keyword_purpose_foreign_key(cursor))
             messages.append(ensure_division_department_foreign_key(cursor))
             messages.append(ensure_referent_department_foreign_key(cursor))
             messages.append(ensure_referent_division_foreign_key(cursor))
