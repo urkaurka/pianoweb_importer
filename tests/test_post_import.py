@@ -13,6 +13,8 @@ from pianoweb_migration.post_import import (
     ensure_project_purpose_foreign_keys,
     ensure_project_foreign_keys,
     ensure_operator_permission_foreign_key,
+    ensure_project_macrophase_foreign_key,
+    ensure_project_group_foreign_key,
     ensure_source_foreign_keys,
     rename_application_columns,
     rename_application_tables,
@@ -477,3 +479,94 @@ def test_rejects_orphan_operator_permission_ids() -> None:
         raise AssertionError("Expected orphan operator permission reference")
 
     assert cursor.execute.call_count == 1
+
+
+def test_creates_project_macrophase_composite_foreign_key() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = []
+    cursor.fetchone.return_value = None
+
+    message = ensure_project_macrophase_foreign_key(cursor)
+
+    assert message == "Checked project macro-phase foreign key: created"
+    assert cursor.execute.call_count == 3
+    statement = cursor.execute.call_args_list[2].args[0]
+    assert 'ALTER TABLE "progetti_macrofasi_fasi"' in statement
+    assert 'FOREIGN KEY ("id_progetto", "id_macrofase")' in statement
+    assert (
+        'REFERENCES "progetti_macrofasi" '
+        '("id_progetto", "id_macrofase")'
+    ) in statement
+
+
+def test_does_not_duplicate_project_macrophase_composite_foreign_key() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = []
+    cursor.fetchone.return_value = ("existing_constraint",)
+
+    message = ensure_project_macrophase_foreign_key(cursor)
+
+    assert message == "Checked project macro-phase foreign key: already exists"
+    assert cursor.execute.call_count == 2
+
+
+def test_rejects_orphan_project_macrophase_pairs() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = [(12, 34)]
+
+    try:
+        ensure_project_macrophase_foreign_key(cursor)
+    except RuntimeError as error:
+        assert "orphan project/macro-phase pairs: (12, 34)" in str(error)
+    else:
+        raise AssertionError("Expected orphan project macro-phase pair")
+
+    assert cursor.execute.call_count == 1
+
+
+def test_deletes_orphan_project_group_rows_before_creating_foreign_key() -> None:
+    cursor = Mock()
+    cursor.fetchall.side_effect = [[(7, 1, 5)], [(7,)], []]
+    cursor.fetchone.return_value = None
+
+    messages = ensure_project_group_foreign_key(cursor)
+
+    assert messages == [
+        "Found 1 orphan row(s) in progetti_gruppi: "
+        "id=7 (project_id=1, group_id=5)",
+        "Deleted 1 orphan row(s) from progetti_gruppi",
+        "Checked progetti_gruppi_id_gruppo_fkey foreign key: created",
+    ]
+    assert cursor.execute.call_count == 5
+    delete_call = cursor.execute.call_args_list[1]
+    assert 'DELETE FROM "progetti_gruppi"' in delete_call.args[0]
+    assert delete_call.args[1] == ([7],)
+    add_statement = cursor.execute.call_args_list[4].args[0]
+    assert 'FOREIGN KEY ("id_gruppo")' in add_statement
+    assert 'REFERENCES "gruppi" ("id")' in add_statement
+
+
+def test_creates_project_group_foreign_key_when_no_orphans_exist() -> None:
+    cursor = Mock()
+    cursor.fetchall.side_effect = [[], []]
+    cursor.fetchone.return_value = None
+
+    messages = ensure_project_group_foreign_key(cursor)
+
+    assert messages == [
+        "Checked progetti_gruppi_id_gruppo_fkey foreign key: created"
+    ]
+    assert cursor.execute.call_count == 4
+
+
+def test_does_not_duplicate_project_group_foreign_key() -> None:
+    cursor = Mock()
+    cursor.fetchall.side_effect = [[], []]
+    cursor.fetchone.return_value = ("existing_constraint",)
+
+    messages = ensure_project_group_foreign_key(cursor)
+
+    assert messages == [
+        "Checked progetti_gruppi_id_gruppo_fkey foreign key: already exists"
+    ]
+    assert cursor.execute.call_count == 3

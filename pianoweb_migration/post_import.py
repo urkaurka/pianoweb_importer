@@ -243,6 +243,45 @@ WHERE columns.table_schema = current_schema()
   AND columns.column_name = 'id_progetto'
 ORDER BY columns.table_name
 """
+PROJECT_GROUP_ORPHANS_SQL = """
+SELECT child."id", child."id_progetto", child."id_gruppo"
+FROM "progetti_gruppi" AS child
+LEFT JOIN "gruppi" AS parent ON parent."id" = child."id_gruppo"
+WHERE parent."id" IS NULL
+ORDER BY child."id"
+"""
+DELETE_PROJECT_GROUP_ORPHANS_SQL = """
+DELETE FROM "progetti_gruppi" AS child
+WHERE child."id" = ANY(%s)
+  AND NOT EXISTS (
+      SELECT 1 FROM "gruppi" AS parent
+      WHERE parent."id" = child."id_gruppo"
+  )
+RETURNING child."id"
+"""
+PROJECT_MACROPHASE_ORPHANS_SQL = """
+SELECT child."id_progetto", child."id_macrofase"
+FROM "progetti_macrofasi_fasi" AS child
+LEFT JOIN "progetti_macrofasi" AS parent
+  ON parent."id_progetto" = child."id_progetto"
+ AND parent."id_macrofase" = child."id_macrofase"
+WHERE parent."id_progetto" IS NULL
+ORDER BY child."id_progetto", child."id_macrofase"
+"""
+PROJECT_MACROPHASE_FOREIGN_KEY_SQL = """
+SELECT constraint_name
+FROM information_schema.table_constraints
+WHERE table_schema = current_schema()
+  AND table_name = 'progetti_macrofasi_fasi'
+  AND constraint_name = 'progetti_macrofasi_fasi_id_progetto_id_macrofase_fkey'
+  AND constraint_type = 'FOREIGN KEY'
+"""
+ADD_PROJECT_MACROPHASE_FOREIGN_KEY_SQL = """
+ALTER TABLE "progetti_macrofasi_fasi"
+ADD CONSTRAINT "progetti_macrofasi_fasi_id_progetto_id_macrofase_fkey"
+FOREIGN KEY ("id_progetto", "id_macrofase")
+REFERENCES "progetti_macrofasi" ("id_progetto", "id_macrofase")
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,6 +498,68 @@ def ensure_operator_permission_foreign_key(cursor: Any) -> str:
     )
 
 
+def ensure_project_macrophase_foreign_key(cursor: Any) -> str:
+    """Ensure each phase belongs to a macro-phase in the same project."""
+    cursor.execute(PROJECT_MACROPHASE_ORPHANS_SQL)
+    orphan_pairs = cursor.fetchall()
+    if orphan_pairs:
+        values = ", ".join(
+            f"({project_id}, {macro_phase_id})"
+            for project_id, macro_phase_id in orphan_pairs
+        )
+        raise RuntimeError(
+            "Cannot create project macro-phase foreign key; "
+            f"orphan project/macro-phase pairs: {values}"
+        )
+
+    cursor.execute(PROJECT_MACROPHASE_FOREIGN_KEY_SQL)
+    if cursor.fetchone() is not None:
+        return "Checked project macro-phase foreign key: already exists"
+
+    cursor.execute(ADD_PROJECT_MACROPHASE_FOREIGN_KEY_SQL)
+    return "Checked project macro-phase foreign key: created"
+
+
+def ensure_project_group_foreign_key(cursor: Any) -> list[str]:
+    """Remove orphan project-group links, then ensure their foreign key."""
+    cursor.execute(PROJECT_GROUP_ORPHANS_SQL)
+    orphan_rows = cursor.fetchall()
+    messages: list[str] = []
+    if orphan_rows:
+        orphan_ids = [row[0] for row in orphan_rows]
+        details = ", ".join(
+            f"id={row[0]} (project_id={row[1]}, group_id={row[2]})"
+            for row in orphan_rows
+        )
+        messages.append(
+            f"Found {len(orphan_rows)} orphan row(s) in progetti_gruppi: {details}"
+        )
+        cursor.execute(DELETE_PROJECT_GROUP_ORPHANS_SQL, (orphan_ids,))
+        deleted_ids = [row[0] for row in cursor.fetchall()]
+        if set(deleted_ids) != set(orphan_ids):
+            raise RuntimeError(
+                "Could not delete every orphan row from progetti_gruppi; "
+                f"expected IDs {orphan_ids}, deleted IDs {deleted_ids}"
+            )
+        messages.append(
+            f"Deleted {len(deleted_ids)} orphan row(s) from progetti_gruppi"
+        )
+
+    messages.append(
+        _ensure_source_foreign_key(
+            cursor,
+            ForeignKeyDefinition(
+                "progetti_gruppi_id_gruppo_fkey",
+                "progetti_gruppi",
+                "id_gruppo",
+                "gruppi",
+                "id",
+            ),
+        )
+    )
+    return messages
+
+
 def rename_application_tables(cursor: Any) -> list[str]:
     cursor.execute(APPLICATION_TABLES_SQL)
     table_names = [row[0] for row in cursor.fetchall()]
@@ -651,6 +752,8 @@ def run_post_import_operations(connection: Any) -> list[str]:
             messages.append(ensure_keyword_purpose_foreign_key(cursor))
             messages.extend(ensure_project_purpose_foreign_keys(cursor))
             messages.extend(ensure_project_foreign_keys(cursor))
+            messages.extend(ensure_project_group_foreign_key(cursor))
+            messages.append(ensure_project_macrophase_foreign_key(cursor))
             messages.append(ensure_division_department_foreign_key(cursor))
             messages.append(ensure_referent_department_foreign_key(cursor))
             messages.append(ensure_referent_division_foreign_key(cursor))
