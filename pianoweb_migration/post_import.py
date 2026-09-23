@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 APPLICATION_TABLES_SQL = """
@@ -203,10 +204,215 @@ ADD CONSTRAINT "referenti_fk_tipo_persona_fkey"
 FOREIGN KEY ("fk_tipo_persona")
 REFERENCES "tabella_tipo_persona" ("id") ON DELETE SET NULL
 """
+ORIGIN_REFERENCE_COLUMNS_SQL = """
+SELECT table_name, column_name
+FROM information_schema.columns
+WHERE table_schema = current_schema()
+  AND lower(column_name) = 'id_origine'
+  AND table_name <> 'progetti'
+UNION
+SELECT key_column_usage.table_name, key_column_usage.column_name
+FROM information_schema.key_column_usage
+JOIN information_schema.referential_constraints
+  USING (constraint_catalog, constraint_schema, constraint_name)
+JOIN information_schema.constraint_column_usage
+  ON constraint_column_usage.constraint_catalog =
+       referential_constraints.unique_constraint_catalog
+ AND constraint_column_usage.constraint_schema =
+       referential_constraints.unique_constraint_schema
+ AND constraint_column_usage.constraint_name =
+       referential_constraints.unique_constraint_name
+WHERE key_column_usage.table_schema = current_schema()
+  AND constraint_column_usage.table_schema = current_schema()
+  AND constraint_column_usage.table_name = 'tabella_origini'
+  AND key_column_usage.table_name <> 'progetti'
+ORDER BY table_name, column_name
+"""
+DROP_PROJECT_ORIGIN_COLUMN_SQL = """
+ALTER TABLE IF EXISTS "progetti" DROP COLUMN IF EXISTS "id_origine"
+"""
+DROP_ORIGIN_TABLE_SQL = 'DROP TABLE IF EXISTS "tabella_origini"'
+
+
+@dataclass(frozen=True, slots=True)
+class ForeignKeyDefinition:
+    """A foreign key found in the restored SQL Server database."""
+
+    name: str
+    table: str
+    column: str
+    referenced_table: str
+    referenced_column: str
+    on_delete: str = "NO ACTION"
+
+
+SOURCE_FOREIGN_KEYS = (
+    ForeignKeyDefinition(
+        "FK_Permessi_PermessiTipiOperatore",
+        "operatoripermessi",
+        "idtipooperatore",
+        "permessitipioperatore",
+        "id",
+    ),
+    ForeignKeyDefinition(
+        "FK_Permessi_PermessiTipiPermessi",
+        "operatoripermessi",
+        "idtipopermesso",
+        "permessitipipermessi",
+        "id",
+    ),
+    ForeignKeyDefinition(
+        "fkTipoProgetto", "progetti", "tipoid", "progetti_tipo", "id"
+    ),
+    ForeignKeyDefinition(
+        "FK_ReportLayouts_ReportDataSources",
+        "reportlayouts",
+        "datasourceid",
+        "reportdatasources",
+        "id",
+    ),
+    ForeignKeyDefinition(
+        "FK_ReportLayouts_ReportType",
+        "reportlayouts",
+        "typeid",
+        "reporttype",
+        "id",
+    ),
+    ForeignKeyDefinition(
+        "FK_ReportLog_ReportLayouts",
+        "reportlog",
+        "layoutid",
+        "reportlayouts",
+        "id",
+    ),
+    ForeignKeyDefinition(
+        "FK_ReportSettings_ReportLayouts",
+        "reportsettings",
+        "layoutid",
+        "reportlayouts",
+        "id",
+        on_delete="CASCADE",
+    ),
+    ForeignKeyDefinition(
+        "FK_ReportSettings_ReportSettings",
+        "reportsettings",
+        "referenceid",
+        "reportsettings",
+        "id",
+    ),
+)
+PROJECT_PURPOSE_FOREIGN_KEYS = tuple(
+    ForeignKeyDefinition(
+        f"{table}_fk_finalita_progetto_fkey",
+        table,
+        "fk_finalita_progetto",
+        "tabella_finalita_progetto",
+        "id",
+        on_delete="SET NULL",
+    )
+    for table in (
+        "fase_controlli_risultato",
+        "fase_rischio_gravita",
+        "gruppi",
+        "indicatore_tipologia",
+        "progetti",
+        "progetti_tipo",
+        "referenti_responsabilita",
+        "tabella_frequenzecontrolli",
+        "tabella_op_aritm_soglia",
+        "tabella_operatori_aritmetici",
+        "tabella_statoavanzamento",
+    )
+)
+SOURCE_FOREIGN_KEY_EXISTS_SQL = """
+SELECT constraints.constraint_name
+FROM information_schema.table_constraints AS constraints
+JOIN information_schema.key_column_usage AS columns
+    ON columns.constraint_catalog = constraints.constraint_catalog
+   AND columns.constraint_schema = constraints.constraint_schema
+   AND columns.constraint_name = constraints.constraint_name
+   AND columns.table_schema = constraints.table_schema
+JOIN information_schema.constraint_column_usage AS referenced_columns
+    ON referenced_columns.constraint_catalog = constraints.constraint_catalog
+   AND referenced_columns.constraint_schema = constraints.constraint_schema
+   AND referenced_columns.constraint_name = constraints.constraint_name
+WHERE constraints.table_schema = current_schema()
+  AND constraints.constraint_type = 'FOREIGN KEY'
+  AND constraints.table_name = %s
+  AND columns.column_name = %s
+  AND referenced_columns.table_schema = current_schema()
+  AND referenced_columns.table_name = %s
+  AND referenced_columns.column_name = %s
+"""
 
 
 def _quote_identifier(identifier: str) -> str:
     return f'"{identifier.replace(chr(34), chr(34) * 2)}"'
+
+
+def _ensure_source_foreign_key(cursor: Any, foreign_key: ForeignKeyDefinition) -> str:
+    table = _quote_identifier(foreign_key.table)
+    column = _quote_identifier(foreign_key.column)
+    referenced_table = _quote_identifier(foreign_key.referenced_table)
+    referenced_column = _quote_identifier(foreign_key.referenced_column)
+
+    cursor.execute(
+        f"""
+        SELECT child.{column}
+        FROM {table} AS child
+        LEFT JOIN {referenced_table} AS parent
+            ON parent.{referenced_column} = child.{column}
+        WHERE child.{column} IS NOT NULL
+          AND parent.{referenced_column} IS NULL
+        ORDER BY child.{column}
+        """
+    )
+    orphan_values = [row[0] for row in cursor.fetchall()]
+    if orphan_values:
+        values = ", ".join(str(value) for value in orphan_values)
+        raise RuntimeError(
+            f"Cannot create {foreign_key.name} foreign key; orphan values: {values}"
+        )
+
+    cursor.execute(
+        SOURCE_FOREIGN_KEY_EXISTS_SQL,
+        (
+            foreign_key.table,
+            foreign_key.column,
+            foreign_key.referenced_table,
+            foreign_key.referenced_column,
+        ),
+    )
+    if cursor.fetchone() is not None:
+        return f"Checked {foreign_key.name} foreign key: already exists"
+
+    cursor.execute(
+        f"""
+        ALTER TABLE {table}
+        ADD CONSTRAINT {_quote_identifier(foreign_key.name)}
+        FOREIGN KEY ({column})
+        REFERENCES {referenced_table} ({referenced_column})
+        ON DELETE {foreign_key.on_delete}
+        ON UPDATE NO ACTION
+        """
+    )
+    return f"Checked {foreign_key.name} foreign key: created"
+
+
+def ensure_source_foreign_keys(cursor: Any) -> list[str]:
+    """Ensure the foreign keys found in the restored SQL Server database exist."""
+    return [
+        _ensure_source_foreign_key(cursor, foreign_key)
+        for foreign_key in SOURCE_FOREIGN_KEYS
+    ]
+
+
+def ensure_project_purpose_foreign_keys(cursor: Any) -> list[str]:
+    """Ensure remaining project-purpose references use foreign keys."""
+    return [
+        _ensure_source_foreign_key(cursor, foreign_key)
+        for foreign_key in PROJECT_PURPOSE_FOREIGN_KEYS
+    ]
 
 
 def rename_application_tables(cursor: Any) -> list[str]:
@@ -252,6 +458,25 @@ def rename_application_columns(cursor: Any) -> list[str]:
 def normalize_audit_table_names(cursor: Any) -> str:
     cursor.execute(AUDIT_TABLE_NAMES_SQL)
     return "Audit table names normalized"
+
+
+def remove_project_origin_reference(cursor: Any) -> list[str]:
+    """Drop the project origin column and lookup table when no other references exist."""
+    cursor.execute(ORIGIN_REFERENCE_COLUMNS_SQL)
+    references = cursor.fetchall()
+    if references:
+        descriptions = ", ".join(f"{table}.{column}" for table, column in references)
+        raise RuntimeError(
+            "Cannot drop tabella_origini; references exist outside progetti: "
+            f"{descriptions}"
+        )
+
+    cursor.execute(DROP_PROJECT_ORIGIN_COLUMN_SQL)
+    cursor.execute(DROP_ORIGIN_TABLE_SQL)
+    return [
+        "Dropped progetti.id_origine",
+        "Dropped tabella_origini",
+    ]
 
 
 def ensure_area_purpose_foreign_key(cursor: Any) -> str:
@@ -376,11 +601,14 @@ def run_post_import_operations(connection: Any) -> list[str]:
                 f"Renamed {len(renamed_tables)} application table(s)",
                 f"Renamed {len(renamed_columns)} application column(s)",
             ]
+            messages.extend(remove_project_origin_reference(cursor))
             messages.append(ensure_area_purpose_foreign_key(cursor))
             messages.append(ensure_person_type_purpose_foreign_key(cursor))
             messages.append(ensure_keyword_purpose_foreign_key(cursor))
+            messages.extend(ensure_project_purpose_foreign_keys(cursor))
             messages.append(ensure_division_department_foreign_key(cursor))
             messages.append(ensure_referent_department_foreign_key(cursor))
             messages.append(ensure_referent_division_foreign_key(cursor))
             messages.append(ensure_referent_person_type_foreign_key(cursor))
+            messages.extend(ensure_source_foreign_keys(cursor))
             return messages

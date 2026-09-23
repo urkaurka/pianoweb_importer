@@ -8,8 +8,13 @@ from pianoweb_migration.post_import import (
     ensure_referent_department_foreign_key,
     ensure_referent_division_foreign_key,
     ensure_referent_person_type_foreign_key,
+    SOURCE_FOREIGN_KEYS,
+    PROJECT_PURPOSE_FOREIGN_KEYS,
+    ensure_project_purpose_foreign_keys,
+    ensure_source_foreign_keys,
     rename_application_columns,
     rename_application_tables,
+    remove_project_origin_reference,
 )
 
 
@@ -59,6 +64,33 @@ def test_rejects_lowercase_table_name_collisions() -> None:
         assert "would collide" in str(error)
     else:
         raise AssertionError("Expected lowercase table name collision")
+
+    assert cursor.execute.call_count == 1
+
+
+def test_drops_project_origin_column_and_origin_table_without_other_references() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = []
+
+    assert remove_project_origin_reference(cursor) == [
+        "Dropped progetti.id_origine",
+        "Dropped tabella_origini",
+    ]
+    assert cursor.execute.call_count == 3
+    assert 'DROP COLUMN IF EXISTS "id_origine"' in cursor.execute.call_args_list[1].args[0]
+    assert cursor.execute.call_args_list[2].args[0] == 'DROP TABLE IF EXISTS "tabella_origini"'
+
+
+def test_rejects_origin_references_in_other_tables() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = [("attivita", "id_origine")]
+
+    try:
+        remove_project_origin_reference(cursor)
+    except RuntimeError as error:
+        assert "attivita.id_origine" in str(error)
+    else:
+        raise AssertionError("Expected external origin reference")
 
     assert cursor.execute.call_count == 1
 
@@ -242,3 +274,105 @@ def test_rejects_orphan_referent_foreign_key_values() -> None:
             raise AssertionError("Expected orphan referent foreign key value")
 
         assert cursor.execute.call_count == 1
+
+
+def test_creates_restored_sqlserver_foreign_keys() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = []
+    cursor.fetchone.return_value = None
+
+    messages = ensure_source_foreign_keys(cursor)
+
+    assert len(messages) == 8
+    assert all(message.endswith("foreign key: created") for message in messages)
+    create_statements = [
+        cursor.execute.call_args_list[index].args[0]
+        for index in range(2, cursor.execute.call_count, 3)
+    ]
+    assert len(create_statements) == len(SOURCE_FOREIGN_KEYS)
+    for foreign_key, statement in zip(SOURCE_FOREIGN_KEYS, create_statements):
+        assert f'ADD CONSTRAINT "{foreign_key.name}"' in statement
+        assert f'ALTER TABLE "{foreign_key.table}"' in statement
+        assert f'FOREIGN KEY ("{foreign_key.column}")' in statement
+        assert (
+            f'REFERENCES "{foreign_key.referenced_table}" '
+            f'("{foreign_key.referenced_column}")'
+        ) in statement
+        expected_delete_action = f"ON DELETE {foreign_key.on_delete}"
+        assert expected_delete_action in statement
+
+
+def test_does_not_duplicate_restored_sqlserver_foreign_keys() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = []
+    cursor.fetchone.return_value = ("existing_constraint",)
+
+    messages = ensure_source_foreign_keys(cursor)
+
+    assert len(messages) == 8
+    assert all(message.endswith("foreign key: already exists") for message in messages)
+    assert cursor.execute.call_count == 2 * len(SOURCE_FOREIGN_KEYS)
+
+
+def test_rejects_orphan_values_for_restored_sqlserver_foreign_key() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = [(99,)]
+
+    try:
+        ensure_source_foreign_keys(cursor)
+    except RuntimeError as error:
+        assert "FK_Permessi_PermessiTipiOperatore" in str(error)
+        assert "orphan values: 99" in str(error)
+    else:
+        raise AssertionError("Expected orphan source foreign key value")
+
+    assert cursor.execute.call_count == 1
+
+
+def test_creates_remaining_project_purpose_foreign_keys() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = []
+    cursor.fetchone.return_value = None
+
+    messages = ensure_project_purpose_foreign_keys(cursor)
+
+    assert len(PROJECT_PURPOSE_FOREIGN_KEYS) == 11
+    assert all(message.endswith("foreign key: created") for message in messages)
+    create_statements = [
+        cursor.execute.call_args_list[index].args[0]
+        for index in range(2, cursor.execute.call_count, 3)
+    ]
+    assert len(create_statements) == len(PROJECT_PURPOSE_FOREIGN_KEYS)
+    for foreign_key, statement in zip(PROJECT_PURPOSE_FOREIGN_KEYS, create_statements):
+        assert f'ALTER TABLE "{foreign_key.table}"' in statement
+        assert f'ADD CONSTRAINT "{foreign_key.name}"' in statement
+        assert 'FOREIGN KEY ("fk_finalita_progetto")' in statement
+        assert 'REFERENCES "tabella_finalita_progetto" ("id")' in statement
+        assert "ON DELETE SET NULL" in statement
+
+
+def test_does_not_duplicate_project_purpose_foreign_keys() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = []
+    cursor.fetchone.return_value = ("existing_constraint",)
+
+    messages = ensure_project_purpose_foreign_keys(cursor)
+
+    assert len(messages) == 11
+    assert all(message.endswith("foreign key: already exists") for message in messages)
+    assert cursor.execute.call_count == 2 * len(PROJECT_PURPOSE_FOREIGN_KEYS)
+
+
+def test_rejects_orphan_project_purpose_values() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = [(99,)]
+
+    try:
+        ensure_project_purpose_foreign_keys(cursor)
+    except RuntimeError as error:
+        assert "fase_controlli_risultato_fk_finalita_progetto_fkey" in str(error)
+        assert "orphan values: 99" in str(error)
+    else:
+        raise AssertionError("Expected orphan project-purpose reference")
+
+    assert cursor.execute.call_count == 1
