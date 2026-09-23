@@ -3,6 +3,7 @@ from unittest.mock import Mock
 from pianoweb_migration.post_import import (
     ensure_area_purpose_foreign_key,
     ensure_division_department_foreign_key,
+    ensure_old_division_department_foreign_key,
     ensure_keyword_purpose_foreign_key,
     ensure_person_type_purpose_foreign_key,
     ensure_referent_department_foreign_key,
@@ -15,6 +16,7 @@ from pianoweb_migration.post_import import (
     ensure_operator_permission_foreign_key,
     ensure_project_macrophase_foreign_key,
     ensure_project_group_foreign_key,
+    ensure_project_division_foreign_key,
     ensure_source_foreign_keys,
     rename_application_columns,
     rename_application_tables,
@@ -228,6 +230,47 @@ def test_rejects_orphan_division_department_references() -> None:
         assert "orphan values: 99" in str(error)
     else:
         raise AssertionError("Expected orphan division department reference")
+
+    assert cursor.execute.call_count == 1
+
+
+def test_creates_old_division_department_foreign_key() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = []
+    cursor.fetchone.return_value = None
+
+    message = ensure_old_division_department_foreign_key(cursor)
+
+    assert message == "Checked divisioni_old_id_dipartimento_fkey foreign key: created"
+    assert cursor.execute.call_count == 3
+    statement = cursor.execute.call_args_list[2].args[0]
+    assert 'ALTER TABLE "divisioni_old"' in statement
+    assert 'FOREIGN KEY ("id_dipartimento")' in statement
+    assert 'REFERENCES "dipartimenti" ("id")' in statement
+
+
+def test_does_not_duplicate_old_division_department_foreign_key() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = []
+    cursor.fetchone.return_value = ("existing_constraint",)
+
+    message = ensure_old_division_department_foreign_key(cursor)
+
+    assert message == "Checked divisioni_old_id_dipartimento_fkey foreign key: already exists"
+    assert cursor.execute.call_count == 2
+
+
+def test_rejects_orphan_old_division_department_references() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = [(99,)]
+
+    try:
+        ensure_old_division_department_foreign_key(cursor)
+    except RuntimeError as error:
+        assert "divisioni_old_id_dipartimento_fkey" in str(error)
+        assert "orphan values: 99" in str(error)
+    else:
+        raise AssertionError("Expected orphan old division department reference")
 
     assert cursor.execute.call_count == 1
 
@@ -568,5 +611,69 @@ def test_does_not_duplicate_project_group_foreign_key() -> None:
 
     assert messages == [
         "Checked progetti_gruppi_id_gruppo_fkey foreign key: already exists"
+    ]
+    assert cursor.execute.call_count == 3
+
+
+def test_deletes_project_division_orphans_below_three_percent() -> None:
+    cursor = Mock()
+    cursor.fetchall.side_effect = [[(42, 1, 118)], [(42,)], []]
+    cursor.fetchone.side_effect = [(100,), None]
+
+    messages = ensure_project_division_foreign_key(cursor)
+
+    assert messages == [
+        "Found 1 orphan row(s) in progetti_divisioni "
+        "(1/100, 1.00%); missing division IDs: 118",
+        "Deleted 1 orphan row(s) from progetti_divisioni",
+        "Checked progetti_divisioni_id_divisione_fkey foreign key: created",
+    ]
+    assert cursor.execute.call_count == 6
+    delete_call = cursor.execute.call_args_list[2]
+    assert 'DELETE FROM "progetti_divisioni"' in delete_call.args[0]
+    assert delete_call.args[1] == ([42],)
+    add_statement = cursor.execute.call_args_list[5].args[0]
+    assert 'FOREIGN KEY ("id_divisione")' in add_statement
+    assert 'REFERENCES "divisioni" ("id")' in add_statement
+
+
+def test_rejects_project_division_orphans_at_three_percent() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = [(1, 1, 118), (2, 2, 119), (3, 3, 120)]
+    cursor.fetchone.return_value = (100,)
+
+    try:
+        ensure_project_division_foreign_key(cursor)
+    except RuntimeError as error:
+        assert "3/100 rows are orphaned (3.00%)" in str(error)
+        assert "threshold is below 3%" in str(error)
+    else:
+        raise AssertionError("Expected 3% orphan threshold to reject cleanup")
+
+    assert cursor.execute.call_count == 2
+
+
+def test_creates_project_division_foreign_key_without_orphans() -> None:
+    cursor = Mock()
+    cursor.fetchall.side_effect = [[], []]
+    cursor.fetchone.return_value = None
+
+    messages = ensure_project_division_foreign_key(cursor)
+
+    assert messages == [
+        "Checked progetti_divisioni_id_divisione_fkey foreign key: created"
+    ]
+    assert cursor.execute.call_count == 4
+
+
+def test_does_not_duplicate_project_division_foreign_key() -> None:
+    cursor = Mock()
+    cursor.fetchall.side_effect = [[], []]
+    cursor.fetchone.return_value = ("existing_constraint",)
+
+    messages = ensure_project_division_foreign_key(cursor)
+
+    assert messages == [
+        "Checked progetti_divisioni_id_divisione_fkey foreign key: already exists"
     ]
     assert cursor.execute.call_count == 3

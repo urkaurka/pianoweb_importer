@@ -259,6 +259,23 @@ WHERE child."id" = ANY(%s)
   )
 RETURNING child."id"
 """
+PROJECT_DIVISION_ORPHANS_SQL = """
+SELECT child."id", child."id_progetto", child."id_divisione"
+FROM "progetti_divisioni" AS child
+LEFT JOIN "divisioni" AS parent ON parent."id" = child."id_divisione"
+WHERE parent."id" IS NULL
+ORDER BY child."id"
+"""
+PROJECT_DIVISION_ROW_COUNT_SQL = 'SELECT count(*) FROM "progetti_divisioni"'
+DELETE_PROJECT_DIVISION_ORPHANS_SQL = """
+DELETE FROM "progetti_divisioni" AS child
+WHERE child."id" = ANY(%s)
+  AND NOT EXISTS (
+      SELECT 1 FROM "divisioni" AS parent
+      WHERE parent."id" = child."id_divisione"
+  )
+RETURNING child."id"
+"""
 PROJECT_MACROPHASE_ORPHANS_SQL = """
 SELECT child."id_progetto", child."id_macrofase"
 FROM "progetti_macrofasi_fasi" AS child
@@ -560,6 +577,57 @@ def ensure_project_group_foreign_key(cursor: Any) -> list[str]:
     return messages
 
 
+def ensure_project_division_foreign_key(cursor: Any) -> list[str]:
+    """Delete a small number of orphan project-division links and add their FK."""
+    cursor.execute(PROJECT_DIVISION_ORPHANS_SQL)
+    orphan_rows = cursor.fetchall()
+    messages: list[str] = []
+    if orphan_rows:
+        cursor.execute(PROJECT_DIVISION_ROW_COUNT_SQL)
+        total_rows = cursor.fetchone()[0]
+        orphan_count = len(orphan_rows)
+        if orphan_count * 100 >= total_rows * 3:
+            percentage = orphan_count / total_rows * 100 if total_rows else 100.0
+            raise RuntimeError(
+                "Cannot create progetti_divisioni foreign key; "
+                f"{orphan_count}/{total_rows} rows are orphaned "
+                f"({percentage:.2f}%), threshold is below 3%"
+            )
+
+        percentage = orphan_count / total_rows * 100
+        division_ids = sorted({row[2] for row in orphan_rows})
+        messages.append(
+            f"Found {orphan_count} orphan row(s) in progetti_divisioni "
+            f"({orphan_count}/{total_rows}, {percentage:.2f}%); "
+            f"missing division IDs: {', '.join(map(str, division_ids))}"
+        )
+        orphan_ids = [row[0] for row in orphan_rows]
+        cursor.execute(DELETE_PROJECT_DIVISION_ORPHANS_SQL, (orphan_ids,))
+        deleted_ids = [row[0] for row in cursor.fetchall()]
+        if set(deleted_ids) != set(orphan_ids):
+            raise RuntimeError(
+                "Could not delete every orphan row from progetti_divisioni; "
+                f"expected IDs {orphan_ids}, deleted IDs {deleted_ids}"
+            )
+        messages.append(
+            f"Deleted {len(deleted_ids)} orphan row(s) from progetti_divisioni"
+        )
+
+    messages.append(
+        _ensure_source_foreign_key(
+            cursor,
+            ForeignKeyDefinition(
+                "progetti_divisioni_id_divisione_fkey",
+                "progetti_divisioni",
+                "id_divisione",
+                "divisioni",
+                "id",
+            ),
+        )
+    )
+    return messages
+
+
 def rename_application_tables(cursor: Any) -> list[str]:
     cursor.execute(APPLICATION_TABLES_SQL)
     table_names = [row[0] for row in cursor.fetchall()]
@@ -685,6 +753,20 @@ def ensure_division_department_foreign_key(cursor: Any) -> str:
     return "Checked DIVISIONI foreign key: created"
 
 
+def ensure_old_division_department_foreign_key(cursor: Any) -> str:
+    """Ensure old divisions reference an existing department."""
+    return _ensure_source_foreign_key(
+        cursor,
+        ForeignKeyDefinition(
+            "divisioni_old_id_dipartimento_fkey",
+            "divisioni_old",
+            "id_dipartimento",
+            "dipartimenti",
+            "id",
+        ),
+    )
+
+
 def _ensure_referent_foreign_key(
     cursor: Any,
     *,
@@ -753,8 +835,10 @@ def run_post_import_operations(connection: Any) -> list[str]:
             messages.extend(ensure_project_purpose_foreign_keys(cursor))
             messages.extend(ensure_project_foreign_keys(cursor))
             messages.extend(ensure_project_group_foreign_key(cursor))
+            messages.extend(ensure_project_division_foreign_key(cursor))
             messages.append(ensure_project_macrophase_foreign_key(cursor))
             messages.append(ensure_division_department_foreign_key(cursor))
+            messages.append(ensure_old_division_department_foreign_key(cursor))
             messages.append(ensure_referent_department_foreign_key(cursor))
             messages.append(ensure_referent_division_foreign_key(cursor))
             messages.append(ensure_referent_person_type_foreign_key(cursor))
