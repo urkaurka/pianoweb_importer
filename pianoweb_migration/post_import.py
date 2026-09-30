@@ -232,6 +232,10 @@ DROP_PROJECT_ORIGIN_COLUMN_SQL = """
 ALTER TABLE IF EXISTS "progetti" DROP COLUMN IF EXISTS "id_origine"
 """
 DROP_ORIGIN_TABLE_SQL = 'DROP TABLE IF EXISTS "tabella_origini"'
+DROP_PROJECT_REFERENT_OPERATIONAL_FLAG_SQL = """
+ALTER TABLE IF EXISTS "progetti_referenti"
+DROP COLUMN IF EXISTS "referente_operativo"
+"""
 PROJECT_FOREIGN_KEY_TABLES_SQL = """
 SELECT columns.table_name
 FROM information_schema.columns AS columns
@@ -258,6 +262,25 @@ WHERE child."id" = ANY(%s)
       WHERE parent."id" = child."id_gruppo"
   )
 RETURNING child."id"
+"""
+OPERATOR_ROLE_ORPHANS_SQL = """
+SELECT child."idoperatore"
+FROM "operatoriruoli" AS child
+LEFT JOIN "operatori" AS parent ON parent."utente" = child."idoperatore"
+WHERE child."idoperatore" IS NOT NULL AND parent."utente" IS NULL
+ORDER BY child."idoperatore"
+"""
+OPERATOR_ROLE_REFERENCE_COUNT_SQL = """
+SELECT count(*) FROM "operatoriruoli" WHERE "idoperatore" IS NOT NULL
+"""
+DELETE_OPERATOR_ROLE_ORPHANS_SQL = """
+DELETE FROM "operatoriruoli" AS child
+WHERE child."idoperatore" = ANY(%s)
+  AND NOT EXISTS (
+      SELECT 1 FROM "operatori" AS parent
+      WHERE parent."utente" = child."idoperatore"
+  )
+RETURNING child."idoperatore"
 """
 PROJECT_DIVISION_ORPHANS_SQL = """
 SELECT child."id", child."id_progetto", child."id_divisione"
@@ -312,6 +335,32 @@ WHERE constraints.table_schema = current_schema()
   AND constraints.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
 GROUP BY constraints.constraint_name
 HAVING count(*) = 1 AND bool_or(columns.column_name = 'id')
+"""
+OPERATOR_USER_UNIQUE_EXISTS_SQL = """
+SELECT constraints.constraint_name
+FROM information_schema.table_constraints AS constraints
+JOIN information_schema.key_column_usage AS columns
+    ON columns.constraint_catalog = constraints.constraint_catalog
+   AND columns.constraint_schema = constraints.constraint_schema
+   AND columns.constraint_name = constraints.constraint_name
+   AND columns.table_schema = constraints.table_schema
+WHERE constraints.table_schema = current_schema()
+  AND constraints.table_name = 'operatori'
+  AND constraints.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+GROUP BY constraints.constraint_name
+HAVING count(*) = 1 AND bool_or(columns.column_name = 'utente')
+"""
+OPERATOR_USER_DUPLICATES_SQL = """
+SELECT "utente", count(*)
+FROM "operatori"
+WHERE "utente" IS NOT NULL
+GROUP BY "utente"
+HAVING count(*) > 1
+ORDER BY "utente"
+"""
+ADD_OPERATOR_USER_UNIQUE_SQL = """
+ALTER TABLE "operatori"
+ADD CONSTRAINT "operatori_utente_key" UNIQUE ("utente")
 """
 STATO_AVANZAMENTO_ID_DUPLICATES_SQL = """
 SELECT "id", count(*)
@@ -525,6 +574,7 @@ INFERRED_FOREIGN_KEYS = tuple(
         ("indicatore_progetti", "fk_progetto", "progetti", "id"),
         ("indicatore_progetti", "fk_valutazione", "valutazione", "pk"),
         ("operatoripianoweb", "id_dip", "dipartimenti", "id"),
+        ("operatoriruoli", "idoperatore", "operatori", "utente"),
         ("referenti_nuovi", "id_dip", "dipartimenti", "id"),
         ("progetti", "id_classe_importanza", "tabella_classiimportanza", "id"),
         ("progetti_aree", "id_area", "aree", "id"),
@@ -727,6 +777,27 @@ def ensure_stato_avanzamento_id_unique(cursor: Any) -> str:
     return "Checked tabella_statoavanzamento.id unique constraint: created"
 
 
+def ensure_operator_user_unique(cursor: Any) -> str:
+    """Ensure operatori.utente can be used as a foreign-key target."""
+    cursor.execute(OPERATOR_USER_UNIQUE_EXISTS_SQL)
+    if cursor.fetchone() is not None:
+        return "Checked operatori.utente unique constraint: already exists"
+
+    cursor.execute(OPERATOR_USER_DUPLICATES_SQL)
+    duplicate_users = cursor.fetchall()
+    if duplicate_users:
+        values = ", ".join(
+            f"{value} ({count} rows)" for value, count in duplicate_users
+        )
+        raise RuntimeError(
+            "Cannot make operatori.utente unique; duplicate values: "
+            f"{values}"
+        )
+
+    cursor.execute(ADD_OPERATOR_USER_UNIQUE_SQL)
+    return "Checked operatori.utente unique constraint: created"
+
+
 def ensure_referent_new_department_column_type(cursor: Any) -> str:
     """Convert verified integral department IDs to PostgreSQL integer."""
     cursor.execute(REFERENT_NEW_DEPARTMENT_COLUMN_TYPE_SQL)
@@ -788,6 +859,40 @@ def _cleanup_small_project_area_orphans(cursor: Any) -> list[str]:
         f"({orphan_count}/{total_rows}, {percentage:.2f}%); "
         f"missing area IDs: {', '.join(map(str, missing_area_ids))}",
         f"Deleted {len(deleted_ids)} orphan row(s) from progetti_aree",
+    ]
+
+
+def _cleanup_small_operator_role_orphans(cursor: Any) -> list[str]:
+    cursor.execute(OPERATOR_ROLE_ORPHANS_SQL)
+    orphan_rows = cursor.fetchall()
+    if not orphan_rows:
+        return []
+
+    cursor.execute(OPERATOR_ROLE_REFERENCE_COUNT_SQL)
+    total_rows = cursor.fetchone()[0]
+    orphan_count = len(orphan_rows)
+    percentage = orphan_count / total_rows * 100 if total_rows else 100.0
+    if orphan_count * 100 >= total_rows * 5:
+        raise RuntimeError(
+            "Cannot create operatoriruoli.idoperatore foreign key; "
+            f"{orphan_count}/{total_rows} rows are orphaned "
+            f"({percentage:.2f}%), threshold is below 5%"
+        )
+
+    orphan_operator_ids = [row[0] for row in orphan_rows]
+    missing_operator_ids = sorted(set(orphan_operator_ids))
+    cursor.execute(DELETE_OPERATOR_ROLE_ORPHANS_SQL, (orphan_operator_ids,))
+    deleted_rows = cursor.fetchall()
+    if len(deleted_rows) != orphan_count:
+        raise RuntimeError(
+            "Could not delete every orphan row from operatoriruoli; "
+            f"expected {orphan_count} rows, deleted {len(deleted_rows)}"
+        )
+    return [
+        f"Found {orphan_count} orphan row(s) in operatoriruoli "
+        f"({orphan_count}/{total_rows}, {percentage:.2f}%); "
+        f"missing operator IDs: {', '.join(map(str, missing_operator_ids))}",
+        f"Deleted {len(deleted_rows)} orphan row(s) from operatoriruoli",
     ]
 
 
@@ -891,9 +996,11 @@ def _ensure_composite_foreign_key(
 def ensure_inferred_foreign_keys(cursor: Any) -> list[str]:
     """Ensure high-confidence references inferred from imported data exist."""
     messages = [ensure_stato_avanzamento_id_unique(cursor)]
+    messages.append(ensure_operator_user_unique(cursor))
     messages.append(ensure_referent_new_department_column_type(cursor))
     messages.extend(_clear_small_project_importance_orphans(cursor))
     messages.extend(_cleanup_small_project_area_orphans(cursor))
+    messages.extend(_cleanup_small_operator_role_orphans(cursor))
     messages.extend(
         _ensure_source_foreign_key(cursor, foreign_key)
         for foreign_key in INFERRED_FOREIGN_KEYS
@@ -1131,6 +1238,12 @@ def remove_project_origin_reference(cursor: Any) -> list[str]:
     ]
 
 
+def remove_project_referent_operational_flag(cursor: Any) -> str:
+    """Drop the unused legacy operational boolean from project-referent links."""
+    cursor.execute(DROP_PROJECT_REFERENT_OPERATIONAL_FLAG_SQL)
+    return "Dropped progetti_referenti.referente_operativo"
+
+
 def ensure_area_purpose_foreign_key(cursor: Any) -> str:
     cursor.execute(AREA_PURPOSE_ORPHANS_SQL)
     orphan_values = [row[0] for row in cursor.fetchall()]
@@ -1268,6 +1381,7 @@ def run_post_import_operations(connection: Any) -> list[str]:
                 f"Renamed {len(renamed_columns)} application column(s)",
             ]
             messages.extend(remove_project_origin_reference(cursor))
+            messages.append(remove_project_referent_operational_flag(cursor))
             messages.append(ensure_area_purpose_foreign_key(cursor))
             messages.append(ensure_person_type_purpose_foreign_key(cursor))
             messages.append(ensure_keyword_purpose_foreign_key(cursor))

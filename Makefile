@@ -19,6 +19,7 @@ help:
 	@echo "      WARNING: this operation is destructive."
 	@echo "  make post_import"
 	@echo "      Apply PostgreSQL operations required after the import."
+	@echo "      Drop the unused progetti_referenti.referente_operativo column."
 	@echo ""
 	@echo "Optional variables:"
 	@echo "  SQLSERVER_CONTAINER=pianoweb-sqlserver"
