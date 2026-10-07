@@ -1,6 +1,9 @@
 from unittest.mock import Mock
 
 from pianoweb_migration.post_import import (
+    INFERRED_FOREIGN_KEYS,
+    _clear_small_project_general_state_orphans,
+    _clear_small_project_importance_orphans,
     ensure_area_purpose_foreign_key,
     ensure_division_department_foreign_key,
     ensure_old_division_department_foreign_key,
@@ -11,6 +14,7 @@ from pianoweb_migration.post_import import (
     ensure_referent_person_type_foreign_key,
     SOURCE_FOREIGN_KEYS,
     PROJECT_PURPOSE_FOREIGN_KEYS,
+    _try_post_import_operation,
     ensure_project_purpose_foreign_keys,
     ensure_project_foreign_keys,
     ensure_operator_permission_foreign_key,
@@ -22,6 +26,107 @@ from pianoweb_migration.post_import import (
     rename_application_tables,
     remove_project_origin_reference,
 )
+
+
+def test_failed_operation_rolls_back_to_savepoint_and_later_operation_runs() -> None:
+    cursor = Mock()
+
+    result, failure = _try_post_import_operation(
+        cursor,
+        "broken foreign key",
+        Mock(side_effect=RuntimeError("orphan values: 7")),
+    )
+    later_result, later_failure = _try_post_import_operation(
+        cursor,
+        "valid foreign key",
+        Mock(return_value="Checked valid foreign key: created"),
+    )
+
+    assert result is None
+    assert failure == "Not applied: broken foreign key: RuntimeError: orphan values: 7"
+    assert later_result == "Checked valid foreign key: created"
+    assert later_failure is None
+    assert cursor.execute.call_args_list[:3][0].args == (
+        "SAVEPOINT post_import_operation",
+    )
+    assert cursor.execute.call_args_list[:3][1].args == (
+        "ROLLBACK TO SAVEPOINT post_import_operation",
+    )
+    assert cursor.execute.call_args_list[:3][2].args == (
+        "RELEASE SAVEPOINT post_import_operation",
+    )
+
+
+def test_clears_project_importance_orphans_below_five_percent() -> None:
+    cursor = Mock()
+    cursor.fetchall.side_effect = [
+        [(10, 900), (20, 901), (30, 900), (40, 902)],
+        [(10,), (20,), (30,), (40,)],
+    ]
+    cursor.fetchone.return_value = (100,)
+
+    messages = _clear_small_project_importance_orphans(cursor)
+
+    assert messages == [
+        "Found 4 orphan project importance value(s) "
+        "(4/100, 4.00%); missing importance IDs: 900, 901, 902",
+        "Cleared orphan project importance values for 4 project(s)",
+    ]
+    assert cursor.execute.call_count == 3
+    assert cursor.execute.call_args_list[2].args[1] == ([10, 20, 30, 40],)
+
+
+def test_clears_project_general_state_orphans_below_five_percent() -> None:
+    cursor = Mock()
+    cursor.fetchall.side_effect = [
+        [(50, 80), (60, 81)],
+        [(50,), (60,)],
+    ]
+    cursor.fetchone.return_value = (100,)
+
+    assert _clear_small_project_general_state_orphans(cursor) == [
+        "Found 2 orphan project general-state value(s) "
+        "(2/100, 2.00%); missing general-state IDs: 80, 81",
+        "Cleared orphan project general-state values for 2 project(s)",
+    ]
+    assert cursor.execute.call_args_list[2].args[1] == ([50, 60],)
+
+
+def test_reports_project_importance_orphans_at_five_percent_without_clearing() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = [(project_id, 900) for project_id in range(5)]
+    cursor.fetchone.return_value = (100,)
+
+    try:
+        _clear_small_project_importance_orphans(cursor)
+    except RuntimeError as error:
+        assert "Found 5 orphan project importance value(s)" in str(error)
+        assert "5/100, 5.00%" in str(error)
+        assert "threshold is below 5%" in str(error)
+    else:
+        raise AssertionError("Expected 5% orphan threshold to reject cleanup")
+
+    assert cursor.execute.call_count == 2
+
+
+def test_reports_zero_project_general_state_orphans() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = []
+    cursor.fetchone.return_value = (100,)
+
+    assert _clear_small_project_general_state_orphans(cursor) == [
+        "Found 0 orphan project general-state value(s) (0/100, 0.00%)",
+    ]
+    assert cursor.execute.call_count == 2
+
+
+def test_inferred_foreign_keys_include_project_general_state() -> None:
+    assert any(
+        (foreign_key.table, foreign_key.column, foreign_key.referenced_table,
+         foreign_key.referenced_column)
+        == ("progetti", "id_statogenerale", "tabella_statigenerale", "id")
+        for foreign_key in INFERRED_FOREIGN_KEYS
+    )
 
 
 def test_renames_mixed_case_application_columns() -> None:

@@ -27,8 +27,11 @@ def main() -> int:
         options="-c search_path=dbo,public",
     )
     try:
-        for message in run_post_import_operations(connection):
+        messages = run_post_import_operations(connection)
+        for message in messages:
             print(message)
+        if any(message.startswith("Not applied:") for message in messages):
+            return 1
     finally:
         connection.close()
     return 0

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -409,6 +410,25 @@ WHERE project."id" = ANY(%s)
   )
 RETURNING project."id"
 """
+PROJECT_GENERAL_STATE_ORPHANS_SQL = """
+SELECT project."id", project."id_statogenerale"
+FROM "progetti" AS project
+LEFT JOIN "tabella_statigenerale" AS general_state
+    ON general_state."id" = project."id_statogenerale"
+WHERE project."id_statogenerale" IS NOT NULL
+  AND general_state."id" IS NULL
+ORDER BY project."id"
+"""
+NULL_PROJECT_GENERAL_STATE_ORPHANS_SQL = """
+UPDATE "progetti" AS project
+SET "id_statogenerale" = NULL
+WHERE project."id" = ANY(%s)
+  AND NOT EXISTS (
+      SELECT 1 FROM "tabella_statigenerale" AS general_state
+      WHERE general_state."id" = project."id_statogenerale"
+  )
+RETURNING project."id"
+"""
 REFERENT_NEW_DEPARTMENT_COLUMN_TYPE_SQL = """
 SELECT data_type
 FROM information_schema.columns
@@ -576,6 +596,7 @@ INFERRED_FOREIGN_KEYS = tuple(
         ("operatoripianoweb", "id_dip", "dipartimenti", "id"),
         ("operatoriruoli", "idoperatore", "operatori", "utente"),
         ("referenti_nuovi", "id_dip", "dipartimenti", "id"),
+        ("progetti", "id_statogenerale", "tabella_statigenerale", "id"),
         ("progetti", "id_classe_importanza", "tabella_classiimportanza", "id"),
         ("progetti_aree", "id_area", "aree", "id"),
         ("progetti_documenti", "id_fase", "fase", "pk"),
@@ -726,7 +747,10 @@ def _ensure_source_foreign_key(cursor: Any, foreign_key: ForeignKeyDefinition) -
     )
     orphan_values = [row[0] for row in cursor.fetchall()]
     if orphan_values:
-        values = ", ".join(str(value) for value in orphan_values)
+        displayed_values = orphan_values[:20]
+        values = ", ".join(str(value) for value in displayed_values)
+        if len(orphan_values) > len(displayed_values):
+            values += f", ... ({len(orphan_values) - len(displayed_values)} more)"
         raise RuntimeError(
             f"Cannot create {foreign_key.name} foreign key; orphan values: {values}"
         )
@@ -896,38 +920,63 @@ def _cleanup_small_operator_role_orphans(cursor: Any) -> list[str]:
     ]
 
 
-def _clear_small_project_importance_orphans(cursor: Any) -> list[str]:
-    cursor.execute(PROJECT_IMPORTANCE_ORPHANS_SQL)
-    orphan_rows = cursor.fetchall()
-    if not orphan_rows:
-        return []
-
+def _clear_small_project_lookup_orphans(
+    cursor: Any,
+    *,
+    description: str,
+    missing_label: str,
+    orphan_sql: str,
+    clear_sql: str,
+) -> list[str]:
     cursor.execute(PROJECT_ROW_COUNT_SQL)
     total_rows = cursor.fetchone()[0]
+    cursor.execute(orphan_sql)
+    orphan_rows = cursor.fetchall()
     orphan_count = len(orphan_rows)
-    percentage = orphan_count / total_rows * 100 if total_rows else 100.0
-    if orphan_count * 100 >= total_rows * 3:
+    percentage = orphan_count / total_rows * 100 if total_rows else 0.0
+    if not orphan_rows:
+        return [f"Found 0 orphan {description} value(s) (0/{total_rows}, 0.00%)"]
+
+    missing_ids = sorted({row[1] for row in orphan_rows})
+    report = (
+        f"Found {orphan_count} orphan {description} value(s) "
+        f"({orphan_count}/{total_rows}, {percentage:.2f}%); "
+        f"missing {missing_label}: {', '.join(map(str, missing_ids))}"
+    )
+    if orphan_count * 100 >= total_rows * 5:
         raise RuntimeError(
-            "Cannot create progetti.id_classe_importanza foreign key; "
-            f"{orphan_count}/{total_rows} projects have orphan values "
-            f"({percentage:.2f}%), threshold is below 3%"
+            f"Cannot clear {description} orphans; {report}; threshold is below 5%"
         )
 
     project_ids = [row[0] for row in orphan_rows]
-    missing_importance_ids = sorted({row[1] for row in orphan_rows})
-    cursor.execute(NULL_PROJECT_IMPORTANCE_ORPHANS_SQL, (project_ids,))
+    cursor.execute(clear_sql, (project_ids,))
     updated_ids = [row[0] for row in cursor.fetchall()]
     if set(updated_ids) != set(project_ids):
         raise RuntimeError(
-            "Could not clear every orphan importance value from progetti; "
+            f"Could not clear every orphan {description} value from progetti; "
             f"expected project IDs {project_ids}, updated IDs {updated_ids}"
         )
-    return [
-        f"Found {orphan_count} orphan project importance value(s) "
-        f"({orphan_count}/{total_rows}, {percentage:.2f}%); "
-        f"missing importance IDs: {', '.join(map(str, missing_importance_ids))}",
-        f"Cleared orphan importance values for {len(updated_ids)} project(s)",
-    ]
+    return [report, f"Cleared orphan {description} values for {len(updated_ids)} project(s)"]
+
+
+def _clear_small_project_importance_orphans(cursor: Any) -> list[str]:
+    return _clear_small_project_lookup_orphans(
+        cursor,
+        description="project importance",
+        missing_label="importance IDs",
+        orphan_sql=PROJECT_IMPORTANCE_ORPHANS_SQL,
+        clear_sql=NULL_PROJECT_IMPORTANCE_ORPHANS_SQL,
+    )
+
+
+def _clear_small_project_general_state_orphans(cursor: Any) -> list[str]:
+    return _clear_small_project_lookup_orphans(
+        cursor,
+        description="project general-state",
+        missing_label="general-state IDs",
+        orphan_sql=PROJECT_GENERAL_STATE_ORPHANS_SQL,
+        clear_sql=NULL_PROJECT_GENERAL_STATE_ORPHANS_SQL,
+    )
 
 
 def _ensure_composite_foreign_key(
@@ -999,6 +1048,7 @@ def ensure_inferred_foreign_keys(cursor: Any) -> list[str]:
     messages.append(ensure_operator_user_unique(cursor))
     messages.append(ensure_referent_new_department_column_type(cursor))
     messages.extend(_clear_small_project_importance_orphans(cursor))
+    messages.extend(_clear_small_project_general_state_orphans(cursor))
     messages.extend(_cleanup_small_project_area_orphans(cursor))
     messages.extend(_cleanup_small_operator_role_orphans(cursor))
     messages.extend(
@@ -1369,33 +1419,149 @@ def ensure_referent_person_type_foreign_key(cursor: Any) -> str:
     )
 
 
+def _try_post_import_operation(
+    cursor: Any,
+    label: str,
+    operation: Callable[[Any], Any],
+) -> tuple[Any | None, str | None]:
+    """Run one operation in a savepoint and return a report on failure."""
+    cursor.execute("SAVEPOINT post_import_operation")
+    try:
+        result = operation(cursor)
+    except Exception as error:
+        cursor.execute("ROLLBACK TO SAVEPOINT post_import_operation")
+        cursor.execute("RELEASE SAVEPOINT post_import_operation")
+        return None, f"Not applied: {label}: {type(error).__name__}: {error}"
+
+    cursor.execute("RELEASE SAVEPOINT post_import_operation")
+    return result, None
+
+
 def run_post_import_operations(connection: Any) -> list[str]:
-    """Normalize imported objects and add required constraints atomically."""
+    """Apply independent post-import operations and report any failures."""
     with connection.transaction():
         with connection.cursor() as cursor:
-            renamed_tables = rename_application_tables(cursor)
-            renamed_columns = rename_application_columns(cursor)
-            normalize_audit_table_names(cursor)
-            messages = [
-                f"Renamed {len(renamed_tables)} application table(s)",
-                f"Renamed {len(renamed_columns)} application column(s)",
-            ]
-            messages.extend(remove_project_origin_reference(cursor))
-            messages.append(remove_project_referent_operational_flag(cursor))
-            messages.append(ensure_area_purpose_foreign_key(cursor))
-            messages.append(ensure_person_type_purpose_foreign_key(cursor))
-            messages.append(ensure_keyword_purpose_foreign_key(cursor))
-            messages.extend(ensure_project_purpose_foreign_keys(cursor))
-            messages.extend(ensure_project_foreign_keys(cursor))
-            messages.extend(ensure_project_group_foreign_key(cursor))
-            messages.extend(ensure_project_division_foreign_key(cursor))
-            messages.append(ensure_project_macrophase_foreign_key(cursor))
-            messages.append(ensure_division_department_foreign_key(cursor))
-            messages.append(ensure_old_division_department_foreign_key(cursor))
-            messages.append(ensure_referent_department_foreign_key(cursor))
-            messages.append(ensure_referent_division_foreign_key(cursor))
-            messages.append(ensure_referent_person_type_foreign_key(cursor))
-            messages.extend(ensure_source_foreign_keys(cursor))
-            messages.append(ensure_operator_permission_foreign_key(cursor))
-            messages.extend(ensure_inferred_foreign_keys(cursor))
+            messages: list[str] = []
+
+            def attempt(label: str, operation: Callable[[Any], Any]) -> Any | None:
+                result, failure = _try_post_import_operation(cursor, label, operation)
+                if failure is not None:
+                    messages.append(failure)
+                elif isinstance(result, str):
+                    messages.append(result)
+                elif result is not None:
+                    messages.extend(result)
+                return result
+
+            attempt("application table renaming", rename_application_tables)
+            attempt("application column renaming", rename_application_columns)
+            attempt("audit table normalization", normalize_audit_table_names)
+            attempt("project origin removal", remove_project_origin_reference)
+            attempt(
+                "project referent operational flag removal",
+                remove_project_referent_operational_flag,
+            )
+
+            for label, operation in (
+                ("area purpose foreign key", ensure_area_purpose_foreign_key),
+                ("person type purpose foreign key", ensure_person_type_purpose_foreign_key),
+                ("keyword purpose foreign key", ensure_keyword_purpose_foreign_key),
+            ):
+                attempt(label, operation)
+
+            for foreign_key in PROJECT_PURPOSE_FOREIGN_KEYS:
+                attempt(
+                    f"{foreign_key.name} foreign key",
+                    lambda active_cursor, definition=foreign_key: _ensure_source_foreign_key(
+                        active_cursor, definition
+                    ),
+                )
+
+            project_foreign_keys, discovery_failure = _try_post_import_operation(
+                cursor,
+                "project foreign-key discovery",
+                _discover_project_foreign_keys,
+            )
+            if discovery_failure is not None:
+                messages.append(discovery_failure)
+            if project_foreign_keys is not None:
+                for foreign_key in project_foreign_keys:
+                    attempt(
+                        f"{foreign_key.name} foreign key",
+                        lambda active_cursor, definition=foreign_key: _ensure_source_foreign_key(
+                            active_cursor, definition
+                        ),
+                    )
+
+            for label, operation in (
+                ("project-group foreign key", ensure_project_group_foreign_key),
+                ("project-division foreign key", ensure_project_division_foreign_key),
+                ("project macro-phase foreign key", ensure_project_macrophase_foreign_key),
+                ("division department foreign key", ensure_division_department_foreign_key),
+                ("old division department foreign key", ensure_old_division_department_foreign_key),
+                ("referent department foreign key", ensure_referent_department_foreign_key),
+                ("referent division foreign key", ensure_referent_division_foreign_key),
+                ("referent person-type foreign key", ensure_referent_person_type_foreign_key),
+            ):
+                attempt(label, operation)
+
+            for foreign_key in SOURCE_FOREIGN_KEYS:
+                attempt(
+                    f"{foreign_key.name} foreign key",
+                    lambda active_cursor, definition=foreign_key: _ensure_source_foreign_key(
+                        active_cursor, definition
+                    ),
+                )
+
+            attempt("operator permission foreign key", ensure_operator_permission_foreign_key)
+
+            for label, operation in (
+                ("stato-avanzamento ID uniqueness", ensure_stato_avanzamento_id_unique),
+                ("operator user uniqueness", ensure_operator_user_unique),
+                ("referent department column type", ensure_referent_new_department_column_type),
+                ("project importance orphan cleanup", _clear_small_project_importance_orphans),
+                ("project general-state orphan cleanup", _clear_small_project_general_state_orphans),
+                ("project-area orphan cleanup", _cleanup_small_project_area_orphans),
+                ("operator-role orphan cleanup", _cleanup_small_operator_role_orphans),
+            ):
+                attempt(label, operation)
+
+            for foreign_key in INFERRED_FOREIGN_KEYS:
+                attempt(
+                    f"{foreign_key.name} foreign key",
+                    lambda active_cursor, definition=foreign_key: _ensure_source_foreign_key(
+                        active_cursor, definition
+                    ),
+                )
+
+            for foreign_key in INFERRED_COMPOSITE_FOREIGN_KEYS:
+                attempt(
+                    f"{foreign_key.name} foreign key",
+                    lambda active_cursor, definition=foreign_key: _ensure_composite_foreign_key(
+                        active_cursor, definition
+                    ),
+                )
+
+            failures = sum(message.startswith("Not applied:") for message in messages)
+            if failures:
+                messages.append(
+                    f"Post-import completed with {failures} operation(s) not applied."
+                )
+            else:
+                messages.append("Post-import completed successfully.")
             return messages
+
+
+def _discover_project_foreign_keys(cursor: Any) -> list[ForeignKeyDefinition]:
+    """Find project-reference columns and build their foreign-key definitions."""
+    cursor.execute(PROJECT_FOREIGN_KEY_TABLES_SQL)
+    return [
+        ForeignKeyDefinition(
+            f"{table}_id_progetto_fkey",
+            table,
+            "id_progetto",
+            "progetti",
+            "id",
+        )
+        for (table,) in cursor.fetchall()
+    ]
