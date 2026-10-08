@@ -21,6 +21,7 @@ from pianoweb_migration.post_import import (
     ensure_project_macrophase_foreign_key,
     ensure_project_group_foreign_key,
     ensure_project_division_foreign_key,
+    ensure_project_department_table,
     ensure_source_foreign_keys,
     rename_application_columns,
     rename_application_tables,
@@ -718,6 +719,43 @@ def test_does_not_duplicate_project_group_foreign_key() -> None:
         "Checked progetti_gruppi_id_gruppo_fkey foreign key: already exists"
     ]
     assert cursor.execute.call_count == 3
+
+
+def test_creates_project_department_table_and_foreign_keys() -> None:
+    cursor = Mock()
+    cursor.fetchall.side_effect = [[], []]
+    cursor.fetchone.side_effect = [None, None]
+
+    messages = ensure_project_department_table(cursor)
+
+    assert messages == [
+        "Ensured progetti_dipartimenti table",
+        "Checked progetti_dipartimenti_id_progetto_fkey foreign key: created",
+        "Checked progetti_dipartimenti_id_dipartimento_fkey foreign key: created",
+    ]
+    assert cursor.execute.call_count == 8
+    assert 'CREATE TABLE IF NOT EXISTS "progetti_dipartimenti"' in cursor.execute.call_args_list[0].args[0]
+    backfill_statement = cursor.execute.call_args_list[1].args[0]
+    assert 'INSERT INTO "progetti_dipartimenti"' in backfill_statement
+    assert 'FROM "progetti_divisioni"' in backfill_statement
+    assert 'NOT EXISTS' in backfill_statement
+    assert 'FOREIGN KEY ("id_progetto")' in cursor.execute.call_args_list[4].args[0]
+    assert 'FOREIGN KEY ("id_dipartimento")' in cursor.execute.call_args_list[7].args[0]
+
+
+def test_does_not_duplicate_project_department_foreign_keys() -> None:
+    cursor = Mock()
+    cursor.fetchall.side_effect = [[], []]
+    cursor.fetchone.side_effect = [("project_fk",), ("department_fk",)]
+
+    messages = ensure_project_department_table(cursor)
+
+    assert messages == [
+        "Ensured progetti_dipartimenti table",
+        "Checked progetti_dipartimenti_id_progetto_fkey foreign key: already exists",
+        "Checked progetti_dipartimenti_id_dipartimento_fkey foreign key: already exists",
+    ]
+    assert cursor.execute.call_count == 6
 
 
 def test_deletes_project_division_orphans_below_three_percent() -> None:

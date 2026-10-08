@@ -24,6 +24,49 @@ AUDIT_TABLE_NAMES_SQL = """
 UPDATE "audit_log" SET table_name = lower(table_name)
 WHERE table_name <> lower(table_name)
 """
+CREATE_PROJECT_DEPARTMENT_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS "progetti_dipartimenti" (
+    "id" integer PRIMARY KEY,
+    "id_progetto" integer NOT NULL,
+    "id_dipartimento" integer NOT NULL,
+    "inserimentodata" timestamp without time zone,
+    "modificadata" timestamp without time zone,
+    "cancelladata" timestamp without time zone
+)
+"""
+BACKFILL_PROJECT_DEPARTMENTS_SQL = """
+WITH inferred_departments AS (
+    SELECT DISTINCT link."id_progetto", division."id_dipartimento"
+    FROM "progetti_divisioni" AS link
+    JOIN "progetti" AS project ON project."id" = link."id_progetto"
+    JOIN "divisioni" AS division ON division."id" = link."id_divisione"
+    JOIN "dipartimenti" AS department
+        ON department."id" = division."id_dipartimento"
+    WHERE link."cancelladata" IS NULL
+      AND division."cancelladata" IS NULL
+      AND department."cancelladata" IS NULL
+), missing_departments AS (
+    SELECT inferred."id_progetto", inferred."id_dipartimento"
+    FROM inferred_departments AS inferred
+    WHERE NOT EXISTS (
+        SELECT 1 FROM "progetti_dipartimenti" AS existing
+        WHERE existing."id_progetto" = inferred."id_progetto"
+          AND existing."id_dipartimento" = inferred."id_dipartimento"
+          AND existing."cancelladata" IS NULL
+    )
+), id_offset AS (
+    SELECT COALESCE(MAX("id"), 0) AS max_id FROM "progetti_dipartimenti"
+)
+INSERT INTO "progetti_dipartimenti" (
+    "id", "id_progetto", "id_dipartimento", "inserimentodata"
+)
+SELECT (id_offset.max_id + ROW_NUMBER() OVER (
+           ORDER BY missing."id_progetto", missing."id_dipartimento"
+       ))::integer,
+       missing."id_progetto", missing."id_dipartimento", CURRENT_TIMESTAMP
+FROM missing_departments AS missing
+CROSS JOIN id_offset
+"""
 AREA_PURPOSE_ORPHANS_SQL = """
 SELECT area."fk_finalita_progetto" FROM "aree" AS area
 LEFT JOIN "tabella_finalita_progetto" AS purpose
@@ -1224,6 +1267,33 @@ def ensure_project_division_foreign_key(cursor: Any) -> list[str]:
     return messages
 
 
+def ensure_project_department_table(cursor: Any) -> list[str]:
+    """Create the independent project-department bridge and its foreign keys."""
+    cursor.execute(CREATE_PROJECT_DEPARTMENT_TABLE_SQL)
+    cursor.execute(BACKFILL_PROJECT_DEPARTMENTS_SQL)
+    messages = ["Ensured progetti_dipartimenti table"]
+    for foreign_key in (
+        ForeignKeyDefinition(
+            "progetti_dipartimenti_id_progetto_fkey",
+            "progetti_dipartimenti",
+            "id_progetto",
+            "progetti",
+            "id",
+            on_delete="CASCADE",
+        ),
+        ForeignKeyDefinition(
+            "progetti_dipartimenti_id_dipartimento_fkey",
+            "progetti_dipartimenti",
+            "id_dipartimento",
+            "dipartimenti",
+            "id",
+            on_delete="CASCADE",
+        ),
+    ):
+        messages.append(_ensure_source_foreign_key(cursor, foreign_key))
+    return messages
+
+
 def rename_application_tables(cursor: Any) -> list[str]:
     cursor.execute(APPLICATION_TABLES_SQL)
     table_names = [row[0] for row in cursor.fetchall()]
@@ -1495,6 +1565,7 @@ def run_post_import_operations(connection: Any) -> list[str]:
 
             for label, operation in (
                 ("project-group foreign key", ensure_project_group_foreign_key),
+                ("project-department table", ensure_project_department_table),
                 ("project-division foreign key", ensure_project_division_foreign_key),
                 ("project macro-phase foreign key", ensure_project_macrophase_foreign_key),
                 ("division department foreign key", ensure_division_department_foreign_key),
