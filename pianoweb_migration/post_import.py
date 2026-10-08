@@ -771,7 +771,12 @@ def _quote_identifier(identifier: str) -> str:
     return f'"{identifier.replace(chr(34), chr(34) * 2)}"'
 
 
-def _ensure_source_foreign_key(cursor: Any, foreign_key: ForeignKeyDefinition) -> str:
+def _ensure_source_foreign_key(
+    cursor: Any,
+    foreign_key: ForeignKeyDefinition,
+    *,
+    skip_orphans_at_or_above_percent: int | None = None,
+) -> str:
     table = _quote_identifier(foreign_key.table)
     column = _quote_identifier(foreign_key.column)
     referenced_table = _quote_identifier(foreign_key.referenced_table)
@@ -790,6 +795,21 @@ def _ensure_source_foreign_key(cursor: Any, foreign_key: ForeignKeyDefinition) -
     )
     orphan_values = [row[0] for row in cursor.fetchall()]
     if orphan_values:
+        if skip_orphans_at_or_above_percent is not None:
+            cursor.execute(f"SELECT count(*) FROM {table}")
+            total_rows = cursor.fetchone()[0]
+            if (
+                total_rows
+                and len(orphan_values) * 100
+                >= total_rows * skip_orphans_at_or_above_percent
+            ):
+                percentage = len(orphan_values) / total_rows * 100
+                return (
+                    f"Skipped {foreign_key.name} foreign key; "
+                    f"{len(orphan_values)}/{total_rows} rows are orphaned "
+                    f"({percentage:.2f}%), threshold is below "
+                    f"{skip_orphans_at_or_above_percent}%"
+                )
         displayed_values = orphan_values[:20]
         values = ", ".join(str(value) for value in displayed_values)
         if len(orphan_values) > len(displayed_values):
@@ -821,6 +841,26 @@ def _ensure_source_foreign_key(cursor: Any, foreign_key: ForeignKeyDefinition) -
         """
     )
     return f"Checked {foreign_key.name} foreign key: created"
+
+
+def _ensure_inferred_foreign_key(
+    cursor: Any, foreign_key: ForeignKeyDefinition
+) -> str:
+    """Skip a project state foreign key when its orphan rate exceeds 5%."""
+    skip_orphans_at_or_above_percent = (
+        5
+        if (
+            foreign_key.table == "progetti"
+            and foreign_key.column == "id_statogenerale"
+            and foreign_key.referenced_table == "tabella_statigenerale"
+        )
+        else None
+    )
+    return _ensure_source_foreign_key(
+        cursor,
+        foreign_key,
+        skip_orphans_at_or_above_percent=skip_orphans_at_or_above_percent,
+    )
 
 
 def ensure_stato_avanzamento_id_unique(cursor: Any) -> str:
@@ -970,6 +1010,7 @@ def _clear_small_project_lookup_orphans(
     missing_label: str,
     orphan_sql: str,
     clear_sql: str,
+    skip_if_over_threshold: bool = False,
 ) -> list[str]:
     cursor.execute(PROJECT_ROW_COUNT_SQL)
     total_rows = cursor.fetchone()[0]
@@ -987,6 +1028,11 @@ def _clear_small_project_lookup_orphans(
         f"missing {missing_label}: {', '.join(map(str, missing_ids))}"
     )
     if orphan_count * 100 >= total_rows * 5:
+        if skip_if_over_threshold:
+            return [
+                report,
+                f"Skipped clearing {description} orphans; threshold is below 5%",
+            ]
         raise RuntimeError(
             f"Cannot clear {description} orphans; {report}; threshold is below 5%"
         )
@@ -1019,6 +1065,7 @@ def _clear_small_project_general_state_orphans(cursor: Any) -> list[str]:
         missing_label="general-state IDs",
         orphan_sql=PROJECT_GENERAL_STATE_ORPHANS_SQL,
         clear_sql=NULL_PROJECT_GENERAL_STATE_ORPHANS_SQL,
+        skip_if_over_threshold=True,
     )
 
 
@@ -1095,7 +1142,7 @@ def ensure_inferred_foreign_keys(cursor: Any) -> list[str]:
     messages.extend(_cleanup_small_project_area_orphans(cursor))
     messages.extend(_cleanup_small_operator_role_orphans(cursor))
     messages.extend(
-        _ensure_source_foreign_key(cursor, foreign_key)
+        _ensure_inferred_foreign_key(cursor, foreign_key)
         for foreign_key in INFERRED_FOREIGN_KEYS
     )
     messages.extend(
@@ -1600,7 +1647,7 @@ def run_post_import_operations(connection: Any) -> list[str]:
             for foreign_key in INFERRED_FOREIGN_KEYS:
                 attempt(
                     f"{foreign_key.name} foreign key",
-                    lambda active_cursor, definition=foreign_key: _ensure_source_foreign_key(
+                    lambda active_cursor, definition=foreign_key: _ensure_inferred_foreign_key(
                         active_cursor, definition
                     ),
                 )

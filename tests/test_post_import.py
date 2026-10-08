@@ -2,8 +2,10 @@ from unittest.mock import Mock
 
 from pianoweb_migration.post_import import (
     INFERRED_FOREIGN_KEYS,
+    ForeignKeyDefinition,
     _clear_small_project_general_state_orphans,
     _clear_small_project_importance_orphans,
+    _ensure_source_foreign_key,
     ensure_area_purpose_foreign_key,
     ensure_division_department_foreign_key,
     ensure_old_division_department_foreign_key,
@@ -91,6 +93,43 @@ def test_clears_project_general_state_orphans_below_five_percent() -> None:
         "Cleared orphan project general-state values for 2 project(s)",
     ]
     assert cursor.execute.call_args_list[2].args[1] == ([50, 60],)
+
+
+def test_skips_project_general_state_cleanup_at_five_percent() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = [(project_id, 2) for project_id in range(5)]
+    cursor.fetchone.return_value = (100,)
+
+    assert _clear_small_project_general_state_orphans(cursor) == [
+        "Found 5 orphan project general-state value(s) "
+        "(5/100, 5.00%); missing general-state IDs: 2",
+        "Skipped clearing project general-state orphans; threshold is below 5%",
+    ]
+    assert cursor.execute.call_count == 2
+
+
+def test_skips_project_general_state_foreign_key_at_five_percent() -> None:
+    cursor = Mock()
+    cursor.fetchall.return_value = [(2,)] * 5
+    cursor.fetchone.return_value = (100,)
+
+    result = _ensure_source_foreign_key(
+        cursor,
+        ForeignKeyDefinition(
+            "progetti_id_statogenerale_fkey",
+            "progetti",
+            "id_statogenerale",
+            "tabella_statigenerale",
+            "id",
+        ),
+        skip_orphans_at_or_above_percent=5,
+    )
+
+    assert result == (
+        "Skipped progetti_id_statogenerale_fkey foreign key; "
+        "5/100 rows are orphaned (5.00%), threshold is below 5%"
+    )
+    assert cursor.execute.call_count == 2
 
 
 def test_reports_project_importance_orphans_at_five_percent_without_clearing() -> None:
